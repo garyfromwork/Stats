@@ -58,8 +58,9 @@ function display.update(fight)
 
     local lines = {}
 
-    -- Header
+    -- Header with total damage
     table.insert(lines, '=== ' .. fight.enemy_name .. ' ===')
+    table.insert(lines, string.format('Total Damage: %d', fight.total_damage or 0))
 
     -- Melee accuracy
     if fight.total_swings > 0 then
@@ -153,6 +154,7 @@ function display.show_summary(fight)
     end
 
     log('=== ' .. fight.enemy_name .. ' ===')
+    log(string.format('Total Damage: %d', fight.total_damage or 0))
 
     -- Melee
     if fight.total_swings > 0 then
@@ -193,9 +195,14 @@ function display.show_detailed(fight)
 
     log('========== Detailed Report: ' .. fight.enemy_name .. ' ==========')
 
-    -- Fight duration
+    -- Fight duration and total damage
     local duration = (fight.end_time or os.time()) - fight.start_time
     log(string.format('Duration: %d:%02d', math.floor(duration / 60), duration % 60))
+    log(string.format('Total Damage: %d', fight.total_damage or 0))
+    if duration > 0 then
+        local dps = math.floor((fight.total_damage or 0) / duration)
+        log(string.format('Average DPS: %d', dps))
+    end
     if fight.result then
         log('Result: ' .. fight.result)
     end

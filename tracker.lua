@@ -48,6 +48,9 @@ function tracker.create_fight_stats(enemy_name, enemy_id)
         -- Job ability stats
         abilities = {},  -- [ability_name] = { uses, total_damage, min, max }
 
+        -- Total damage tracking (running total for quick access)
+        total_damage = 0,
+
         -- DPS tracking
         damage_samples = {},  -- For calculating DPS over time
     }
@@ -91,6 +94,7 @@ function tracker.record_melee(fight, session, data)
     if data.hit then
         fight.total_hits = fight.total_hits + 1
         fight.melee_damage = fight.melee_damage + data.damage
+        fight.total_damage = fight.total_damage + data.damage  -- Update running total
         session.melee.hits = session.melee.hits + 1
         session.melee.total_damage = session.melee.total_damage + data.damage
 
@@ -140,6 +144,7 @@ function tracker.record_ranged(fight, session, data)
     if data.hit then
         fight.ranged_hits = fight.ranged_hits + 1
         fight.ranged_damage = fight.ranged_damage + data.damage
+        fight.total_damage = fight.total_damage + data.damage  -- Update running total
         session.ranged.hits = session.ranged.hits + 1
         session.ranged.total_damage = session.ranged.total_damage + data.damage
 
@@ -206,6 +211,7 @@ function tracker.record_weaponskill(fight, session, data)
     if data.hit then
         fight_ws.hits = fight_ws.hits + 1
         fight_ws.total_damage = fight_ws.total_damage + data.damage
+        fight.total_damage = fight.total_damage + data.damage  -- Update running total
         session_ws.hits = session_ws.hits + 1
         session_ws.total_damage = session_ws.total_damage + data.damage
 
@@ -285,6 +291,7 @@ function tracker.record_spell(fight, session, data)
 
     if data.damage > 0 then
         fight_spell.total_damage = fight_spell.total_damage + data.damage
+        fight.total_damage = fight.total_damage + data.damage  -- Update running total
         session_spell.total_damage = session_spell.total_damage + data.damage
 
         if not fight_spell.min_damage or data.damage < fight_spell.min_damage then
@@ -340,6 +347,7 @@ function tracker.record_ability(fight, session, data)
 
     fight_ability.uses = fight_ability.uses + 1
     fight_ability.total_damage = fight_ability.total_damage + data.damage
+    fight.total_damage = fight.total_damage + data.damage  -- Update running total
     session_ability.uses = session_ability.uses + 1
     session_ability.total_damage = session_ability.total_damage + data.damage
 
@@ -379,6 +387,7 @@ function tracker.combine_stats(dest, source)
     dest.total_crits = dest.total_crits + source.total_crits
     dest.melee_damage = dest.melee_damage + source.melee_damage
     dest.melee_crit_damage = dest.melee_crit_damage + source.melee_crit_damage
+    dest.total_damage = dest.total_damage + source.total_damage
 
     -- Min/max
     if source.melee_min then

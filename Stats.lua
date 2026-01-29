@@ -113,52 +113,82 @@ end
 -------------------------------------------
 
 -- Message ID references for determining hit/miss/etc
+-- Reference: https://github.com/Windower/Resources/blob/master/resources_data/action_messages.lua
 local hit_messages = {
-    [1] = true,    -- Melee hit
-    [15] = true,   -- Melee hit (additional effect)
-    [63] = true,   -- Critical hit
-    [352] = true,  -- Ranged hit
-    [353] = true,  -- Ranged critical
-    [576] = true,  -- Ranged hit (squarely)
-    [577] = true,  -- Ranged critical (squarely)
+    [1] = true,    -- Melee hit: "${actor} hits ${target} for ${number} points of damage."
+    [67] = true,   -- Critical hit: "${actor} scores a critical hit!${lb}${target} takes ${number} points of damage."
+    [352] = true,  -- Ranged hit: "${actor}'s ranged attack hits ${target} for ${number} points of damage."
+    [353] = true,  -- Ranged critical: "${actor}'s ranged attack scores a critical hit!"
+    [576] = true,  -- Ranged hit (squarely): "${actor}'s ranged attack hits ${target} squarely"
+    [577] = true,  -- Ranged strike true: "${actor}'s ranged attack strikes true, pummeling ${target}"
+}
+
+local crit_messages = {
+    [67] = true,   -- Melee critical hit
+    [353] = true,  -- Ranged critical hit
 }
 
 local miss_messages = {
-    [15] = false,  -- Miss
-    [0] = true,    -- Miss (some contexts)
-    [354] = true,  -- Ranged miss
-    [324] = true,  -- Anticipated (shadow absorbed for reference)
+    [15] = true,   -- Miss: "${actor} misses ${target}."
+    [63] = true,   -- Miss (alternate): "${actor} misses ${target}."
+    [30] = true,   -- Anticipated: "${target} anticipates the attack."
+    [32] = true,   -- Dodged: "${target} dodges the attack."
+    [69] = true,   -- Blocked: "${target} blocks ${actor}'s attack with his shield."
+    [70] = true,   -- Parried: "${target} parries ${actor}'s attack with his weapon."
+    [354] = true,  -- Ranged miss: "${actor}'s ranged attack misses."
+    [355] = true,  -- Ranged no effect: "${actor}'s ranged attack has no effect on ${target}."
 }
 
-local ws_messages = {
-    [185] = true,  -- WS damage
-    [186] = true,  -- WS damage (MB)
-    [187] = true,  -- WS damage
-    [188] = true,  -- WS no damage
-    [189] = true,  -- WS miss
-    [317] = true,  -- WS damage (additional)
+local ws_hit_messages = {
+    [185] = true,  -- WS damage: "${actor} uses ${weapon_skill}.${lb}${target} takes ${number} points of damage."
+    [186] = true,  -- WS status effect: "${actor} uses ${weapon_skill}.${lb}${target} gains the effect of ${status}."
+    [187] = true,  -- WS HP drain: "${actor} uses ${weapon_skill}.${lb}${number} HP drained from ${target}."
+    [194] = true,  -- WS status effect (alt): "${actor} uses ${weapon_skill}.${lb}${target} gains the effect of ${status}."
+    [224] = true,  -- WS MP recovery: "${actor} uses ${weapon_skill}.${lb}${target} recovers ${number} MP."
+    [225] = true,  -- WS MP drain: "${actor} uses ${weapon_skill}.${lb}${number} MP drained from ${target}."
+    [226] = true,  -- WS TP drain: "${actor} uses ${weapon_skill}.${lb}${number} TP drained from ${target}."
+    [238] = true,  -- WS HP recovery: "${actor} uses ${weapon_skill}.${lb}${target} recovers ${number} HP."
+    [242] = true,  -- WS status: "${actor} uses ${weapon_skill}.${lb}${target} is ${status}."
+}
+
+local ws_miss_messages = {
+    [188] = true,  -- WS miss: "${actor} uses ${weapon_skill}, but misses ${target}."
+    [189] = true,  -- WS no effect: "${actor} uses ${weapon_skill}.${lb}No effect on ${target}."
+}
+
+local spell_damage_messages = {
+    [2] = true,    -- Spell damage: "${actor} casts ${spell}.${lb}${target} takes ${number} points of damage."
+    [252] = true,  -- Magic Burst damage: "${actor} casts ${spell}.${lb}Magic Burst! ${target} takes ${number} points of damage."
+    [265] = true,  -- Magic Burst (alt): "Magic Burst! ${target} takes ${number} points of damage."
+    [274] = true,  -- Magic Burst HP drain: "${actor} casts ${spell}.${lb}Magic Burst! ${number} HP drained from ${target}."
+    [275] = true,  -- Magic Burst MP drain: "${actor} casts ${spell}.${lb}Magic Burst! ${number} MP drained from ${target}."
 }
 
 local spell_land_messages = {
     [2] = true,    -- Spell damage
-    [227] = true,  -- Enfeeble lands
-    [236] = true,  -- Spell resisted (partial)
-    [237] = true,  -- No effect (full resist)
-    [252] = true,  -- Enfeeble lands (alt)
-    [253] = true,  -- Enfeeble resisted
-    [266] = true,  -- Enfeeble wears (for reference)
-    [270] = true,  -- Spell lands
-    [271] = true,  -- Spell has no effect
-    [277] = true,  -- Spell lands (alt)
+    [7] = true,    -- HP recovery: "${actor} casts ${spell}.${lb}${target} recovers ${number} HP."
+    [82] = true,   -- Status applied: "${actor} casts ${spell}.${lb}${target} is ${status}!"
+    [227] = true,  -- HP drain: "${actor} casts ${spell}.${lb}${number} HP drained from ${target}."
+    [228] = true,  -- MP drain: "${actor} casts ${spell}.${lb}${number} MP drained from ${target}."
+    [230] = true,  -- Status gained: "${actor} casts ${spell}.${lb}${target} gains the effect of ${status}."
+    [236] = true,  -- Status applied (alt): "${actor} casts ${spell}.${lb}${target} is ${status}."
+    [237] = true,  -- Status received: "${actor} casts ${spell}.${lb}${target} receives the effect of ${status}."
+    [252] = true,  -- Magic Burst damage
+    [268] = true,  -- Magic Burst status: "${actor} casts ${spell}.${lb}Magic Burst! ${target} receives the effect of ${status}."
+    [271] = true,  -- Magic Burst status: "${actor} casts ${spell}.${lb}Magic Burst! ${target} is ${status}."
 }
 
 local spell_resist_messages = {
-    [85] = true,   -- Resisted
-    [236] = true,  -- Partial resist
-    [237] = true,  -- Full resist / no effect
-    [253] = true,  -- Enfeeble resisted
-    [284] = true,  -- Resisted
-    [655] = true,  -- Resisted
+    [75] = true,   -- No effect: "${actor}'s ${spell} has no effect on ${target}."
+    [85] = true,   -- Resisted: "${actor} casts ${spell}.${lb}${target} resists the spell."
+    [284] = true,  -- Resisted: "${target} resists the effects of the spell!"
+    [655] = true,  -- Completely resisted: "${actor} casts ${spell}.${lb}${target} completely resists the spell."
+    [656] = true,  -- Completely resisted (alt): "${target} completely resists the spell."
+}
+
+local spell_no_effect_messages = {
+    [75] = true,   -- No effect
+    [283] = true,  -- No effect: "No effect on ${target}."
 }
 
 local function process_melee_action(act)
@@ -172,20 +202,18 @@ local function process_melee_action(act)
             local damage = action.param or 0
             local message = action.message
 
-            -- Determine if hit or miss
+            -- Determine if hit or miss using correct message IDs
             local is_hit = false
             local is_crit = false
 
-            if message == 1 or message == 15 then
+            if hit_messages[message] then
                 is_hit = true
-            elseif message == 63 then
-                is_hit = true
-                is_crit = true
-            elseif message == 0 or message == 354 then
-                -- Miss
+                is_crit = crit_messages[message] or false
+            elseif miss_messages[message] then
+                -- Explicit miss messages (15, 63, 30, 32, 69, 70)
                 is_hit = false
             else
-                -- Default: if damage > 0, it's a hit
+                -- Fallback: if damage > 0, it's a hit
                 is_hit = damage > 0
             end
 
@@ -195,8 +223,12 @@ local function process_melee_action(act)
                 damage = damage
             })
 
-            if settings.parse_to_chat and damage > 0 then
-                log(string.format('Melee: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
+            if settings.parse_to_chat then
+                if is_hit and damage > 0 then
+                    log(string.format('Melee: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
+                elseif not is_hit then
+                    log('Melee: MISS')
+                end
             end
         end
     end
@@ -215,10 +247,15 @@ local function process_ranged_action(act)
             local damage = action.param or 0
             local message = action.message
 
-            local is_hit = (message == 352 or message == 353 or message == 576 or message == 577)
-            local is_crit = (message == 353 or message == 577)
+            -- Use lookup tables for ranged hit detection
+            local is_hit = hit_messages[message] or false
+            local is_crit = crit_messages[message] or false
 
-            if not is_hit and damage > 0 then
+            -- Check for explicit ranged miss
+            if miss_messages[message] then
+                is_hit = false
+            elseif not is_hit and damage > 0 then
+                -- Fallback: if damage > 0, it's a hit
                 is_hit = true
             end
 
@@ -228,8 +265,12 @@ local function process_ranged_action(act)
                 damage = damage
             })
 
-            if settings.parse_to_chat and damage > 0 then
-                log(string.format('Ranged: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
+            if settings.parse_to_chat then
+                if is_hit and damage > 0 then
+                    log(string.format('Ranged: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
+                elseif not is_hit then
+                    log('Ranged: MISS')
+                end
             end
         end
     end
@@ -253,11 +294,13 @@ local function process_weaponskill_action(act)
 
         for _, action in ipairs(target.actions) do
             local damage = action.param or 0
+            local message = action.message
             total_damage = total_damage + damage
 
-            if action.message == 188 or action.message == 189 then
+            -- Use correct WS miss messages (188 = miss, 189 = no effect)
+            if ws_miss_messages[message] then
                 miss = true
-            else
+            elseif ws_hit_messages[message] or damage > 0 then
                 hit_count = hit_count + 1
             end
         end
@@ -265,7 +308,7 @@ local function process_weaponskill_action(act)
         tracker.record_weaponskill(state.current_fight, state.session_stats, {
             name = ws_name,
             damage = total_damage,
-            hit = not miss and total_damage > 0,
+            hit = not miss and (hit_count > 0 or total_damage > 0),
             hits = hit_count
         })
 
@@ -296,18 +339,30 @@ local function process_spell_action(act)
             local damage = action.param or 0
             local message = action.message
 
-            -- Determine if spell landed or resisted
-            local landed = true
+            -- Determine if spell landed or resisted using correct message IDs
+            local landed = false
             local resisted = false
+            local is_magic_burst = false
 
+            -- Check for resist messages first (75, 85, 284, 655, 656)
             if spell_resist_messages[message] then
                 resisted = true
-                landed = (message == 236)  -- Partial resist still "lands"
-            end
-
-            -- For enfeebling/status spells
-            if message == 237 or message == 271 then
-                landed = false  -- No effect
+                landed = false
+            -- Check for no effect messages
+            elseif spell_no_effect_messages[message] then
+                landed = false
+                resisted = true
+            -- Check for landed messages (damage, status effects, drains, etc.)
+            elseif spell_land_messages[message] then
+                landed = true
+                -- Check if it was a Magic Burst (252, 265, 268, 271, 274, 275)
+                if message == 252 or message == 265 or message == 268 or
+                   message == 271 or message == 274 or message == 275 then
+                    is_magic_burst = true
+                end
+            -- Fallback: if damage > 0, it landed
+            elseif damage > 0 then
+                landed = true
             end
 
             tracker.record_spell(state.current_fight, state.session_stats, {
@@ -320,9 +375,12 @@ local function process_spell_action(act)
 
             if settings.parse_to_chat then
                 if damage > 0 then
-                    log(string.format('Spell: %s - %d damage%s', spell_name, damage, resisted and ' (resisted)' or ''))
-                else
-                    log(string.format('Spell: %s - %s', spell_name, landed and 'Landed' or 'Resisted'))
+                    local mb_str = is_magic_burst and ' (MB!)' or ''
+                    log(string.format('Spell: %s - %d damage%s', spell_name, damage, mb_str))
+                elseif resisted then
+                    log(string.format('Spell: %s - RESISTED', spell_name))
+                elseif landed then
+                    log(string.format('Spell: %s - Landed', spell_name))
                 end
             end
         end
@@ -467,8 +525,9 @@ windower.register_event('addon command', function(...)
                 local acc = fight.total_swings > 0 and
                     math.floor((fight.total_hits / fight.total_swings) * 100) or 0
                 local duration = fight.end_time and (fight.end_time - fight.start_time) or 0
-                log(string.format('%d. %s - Acc: %d%% (%d/%d) - %s',
-                    i, fight.enemy_name, acc, fight.total_hits, fight.total_swings,
+                local total_dmg = fight.total_damage or 0
+                log(string.format('%d. %s - Dmg: %d | Acc: %d%% - %s',
+                    i, fight.enemy_name, total_dmg, acc,
                     fight.result or 'Ongoing'))
             end
         end
