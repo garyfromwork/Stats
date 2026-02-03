@@ -40,6 +40,8 @@ local defaults = {
     overlay_enabled = true,
     overlay_position = { x = 100, y = 100 },
     track_party = false,  -- Only track self by default
+    track_trusts = false, -- Track trust damage
+    track_pets = false,   -- Track pet damage
     auto_reset_on_new_fight = true,
     history_limit = 50
 }
@@ -55,7 +57,9 @@ local state = {
     fight_history = {},
     session_stats = tracker.create_session_stats(),
     player_id = nil,
-    player_name = nil
+    player_name = nil,
+    trust_ids = {},   -- Table of trust mob IDs
+    pet_id = nil      -- Player's pet ID
 }
 
 -------------------------------------------
@@ -80,6 +84,62 @@ end
 
 local function is_player_action(actor_id)
     return actor_id == state.player_id
+end
+
+-- Update trust IDs from current party
+local function update_trust_ids()
+    state.trust_ids = {}
+    local party = windower.ffxi.get_party()
+    if party then
+        for i = 0, 5 do
+            local member = party['p' .. i]
+            if member and member.mob then
+                local mob = windower.ffxi.get_mob_by_id(member.mob.id)
+                -- Trusts have spawn_type 14 (Trust) and are not the player
+                if mob and mob.spawn_type == 14 and mob.id ~= state.player_id then
+                    state.trust_ids[mob.id] = mob.name
+                end
+            end
+        end
+    end
+end
+
+-- Update pet ID from player's current pet
+local function update_pet_id()
+    state.pet_id = nil
+    local player = windower.ffxi.get_player()
+    if player then
+        local pet_index = windower.ffxi.get_mob_by_target('pet')
+        if pet_index then
+            state.pet_id = pet_index.id
+        end
+    end
+end
+
+-- Check if actor is a trust
+local function is_trust_action(actor_id)
+    if not settings.track_trusts then return false end
+    return state.trust_ids[actor_id] ~= nil
+end
+
+-- Check if actor is the player's pet
+local function is_pet_action(actor_id)
+    if not settings.track_pets then return false end
+    return state.pet_id and actor_id == state.pet_id
+end
+
+-- Get trust name by ID
+local function get_trust_name(actor_id)
+    return state.trust_ids[actor_id] or 'Unknown Trust'
+end
+
+-- Get pet name
+local function get_pet_name()
+    if state.pet_id then
+        local pet = windower.ffxi.get_mob_by_id(state.pet_id)
+        if pet then return pet.name end
+    end
+    return 'Pet'
 end
 
 local function start_new_fight(enemy_name, enemy_id)
@@ -192,7 +252,11 @@ local spell_no_effect_messages = {
 }
 
 local function process_melee_action(act)
-    if not is_player_action(act.actor_id) then return end
+    local is_player = is_player_action(act.actor_id)
+    local is_trust = is_trust_action(act.actor_id)
+    local is_pet = is_pet_action(act.actor_id)
+
+    if not is_player and not is_trust and not is_pet then return end
 
     for _, target in ipairs(act.targets) do
         local enemy_name = get_mob_name(target.id)
@@ -217,17 +281,45 @@ local function process_melee_action(act)
                 is_hit = damage > 0
             end
 
-            tracker.record_melee(state.current_fight, state.session_stats, {
-                hit = is_hit,
-                critical = is_crit,
-                damage = damage
-            })
+            if is_player then
+                tracker.record_melee(state.current_fight, state.session_stats, {
+                    hit = is_hit,
+                    critical = is_crit,
+                    damage = damage
+                })
 
-            if settings.parse_to_chat then
-                if is_hit and damage > 0 then
-                    log(string.format('Melee: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
-                elseif not is_hit then
-                    log('Melee: MISS')
+                if settings.parse_to_chat then
+                    if is_hit and damage > 0 then
+                        log(string.format('Melee: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
+                    elseif not is_hit then
+                        log('Melee: MISS')
+                    end
+                end
+            elseif is_trust then
+                local trust_name = get_trust_name(act.actor_id)
+                tracker.record_trust_melee(state.current_fight, state.session_stats, trust_name, {
+                    hit = is_hit,
+                    critical = is_crit,
+                    damage = damage
+                })
+
+                if settings.parse_to_chat then
+                    if is_hit and damage > 0 then
+                        log(string.format('[%s] Melee: %d damage%s', trust_name, damage, is_crit and ' (CRIT)' or ''))
+                    end
+                end
+            elseif is_pet then
+                local pet_name = get_pet_name()
+                tracker.record_pet_melee(state.current_fight, state.session_stats, pet_name, {
+                    hit = is_hit,
+                    critical = is_crit,
+                    damage = damage
+                })
+
+                if settings.parse_to_chat then
+                    if is_hit and damage > 0 then
+                        log(string.format('[%s] Melee: %d damage%s', pet_name, damage, is_crit and ' (CRIT)' or ''))
+                    end
                 end
             end
         end
@@ -237,7 +329,11 @@ local function process_melee_action(act)
 end
 
 local function process_ranged_action(act)
-    if not is_player_action(act.actor_id) then return end
+    local is_player = is_player_action(act.actor_id)
+    local is_trust = is_trust_action(act.actor_id)
+    local is_pet = is_pet_action(act.actor_id)
+
+    if not is_player and not is_trust and not is_pet then return end
 
     for _, target in ipairs(act.targets) do
         local enemy_name = get_mob_name(target.id)
@@ -259,17 +355,45 @@ local function process_ranged_action(act)
                 is_hit = true
             end
 
-            tracker.record_ranged(state.current_fight, state.session_stats, {
-                hit = is_hit,
-                critical = is_crit,
-                damage = damage
-            })
+            if is_player then
+                tracker.record_ranged(state.current_fight, state.session_stats, {
+                    hit = is_hit,
+                    critical = is_crit,
+                    damage = damage
+                })
 
-            if settings.parse_to_chat then
-                if is_hit and damage > 0 then
-                    log(string.format('Ranged: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
-                elseif not is_hit then
-                    log('Ranged: MISS')
+                if settings.parse_to_chat then
+                    if is_hit and damage > 0 then
+                        log(string.format('Ranged: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
+                    elseif not is_hit then
+                        log('Ranged: MISS')
+                    end
+                end
+            elseif is_trust then
+                local trust_name = get_trust_name(act.actor_id)
+                tracker.record_trust_ranged(state.current_fight, state.session_stats, trust_name, {
+                    hit = is_hit,
+                    critical = is_crit,
+                    damage = damage
+                })
+
+                if settings.parse_to_chat then
+                    if is_hit and damage > 0 then
+                        log(string.format('[%s] Ranged: %d damage%s', trust_name, damage, is_crit and ' (CRIT)' or ''))
+                    end
+                end
+            elseif is_pet then
+                local pet_name = get_pet_name()
+                tracker.record_pet_ranged(state.current_fight, state.session_stats, pet_name, {
+                    hit = is_hit,
+                    critical = is_crit,
+                    damage = damage
+                })
+
+                if settings.parse_to_chat then
+                    if is_hit and damage > 0 then
+                        log(string.format('[%s] Ranged: %d damage%s', pet_name, damage, is_crit and ' (CRIT)' or ''))
+                    end
                 end
             end
         end
@@ -279,7 +403,11 @@ local function process_ranged_action(act)
 end
 
 local function process_weaponskill_action(act)
-    if not is_player_action(act.actor_id) then return end
+    local is_player = is_player_action(act.actor_id)
+    local is_trust = is_trust_action(act.actor_id)
+    local is_pet = is_pet_action(act.actor_id)
+
+    if not is_player and not is_trust and not is_pet then return end
 
     local ws = res.weapon_skills[act.param]
     local ws_name = ws and ws.en or ('WS#' .. act.param)
@@ -305,18 +433,48 @@ local function process_weaponskill_action(act)
             end
         end
 
-        tracker.record_weaponskill(state.current_fight, state.session_stats, {
-            name = ws_name,
-            damage = total_damage,
-            hit = not miss and (hit_count > 0 or total_damage > 0),
-            hits = hit_count
-        })
+        if is_player then
+            tracker.record_weaponskill(state.current_fight, state.session_stats, {
+                name = ws_name,
+                damage = total_damage,
+                hit = not miss and (hit_count > 0 or total_damage > 0),
+                hits = hit_count
+            })
 
-        if settings.parse_to_chat then
-            if miss then
-                log(string.format('WS: %s - MISS', ws_name))
-            else
-                log(string.format('WS: %s - %d damage', ws_name, total_damage))
+            if settings.parse_to_chat then
+                if miss then
+                    log(string.format('WS: %s - MISS', ws_name))
+                else
+                    log(string.format('WS: %s - %d damage', ws_name, total_damage))
+                end
+            end
+        elseif is_trust then
+            local trust_name = get_trust_name(act.actor_id)
+            tracker.record_trust_weaponskill(state.current_fight, state.session_stats, trust_name, {
+                name = ws_name,
+                damage = total_damage,
+                hit = not miss and (hit_count > 0 or total_damage > 0),
+                hits = hit_count
+            })
+
+            if settings.parse_to_chat then
+                if not miss and total_damage > 0 then
+                    log(string.format('[%s] WS: %s - %d damage', trust_name, ws_name, total_damage))
+                end
+            end
+        elseif is_pet then
+            local pet_name = get_pet_name()
+            tracker.record_pet_weaponskill(state.current_fight, state.session_stats, pet_name, {
+                name = ws_name,
+                damage = total_damage,
+                hit = not miss and (hit_count > 0 or total_damage > 0),
+                hits = hit_count
+            })
+
+            if settings.parse_to_chat then
+                if not miss and total_damage > 0 then
+                    log(string.format('[%s] WS: %s - %d damage', pet_name, ws_name, total_damage))
+                end
             end
         end
     end
@@ -325,7 +483,11 @@ local function process_weaponskill_action(act)
 end
 
 local function process_spell_action(act)
-    if not is_player_action(act.actor_id) then return end
+    local is_player = is_player_action(act.actor_id)
+    local is_trust = is_trust_action(act.actor_id)
+    local is_pet = is_pet_action(act.actor_id)
+
+    if not is_player and not is_trust and not is_pet then return end
 
     local spell = res.spells[act.param]
     local spell_name = spell and spell.en or ('Spell#' .. act.param)
@@ -365,22 +527,56 @@ local function process_spell_action(act)
                 landed = true
             end
 
-            tracker.record_spell(state.current_fight, state.session_stats, {
-                name = spell_name,
-                type = spell_type,
-                damage = damage,
-                landed = landed,
-                resisted = resisted
-            })
+            if is_player then
+                tracker.record_spell(state.current_fight, state.session_stats, {
+                    name = spell_name,
+                    type = spell_type,
+                    damage = damage,
+                    landed = landed,
+                    resisted = resisted
+                })
 
-            if settings.parse_to_chat then
-                if damage > 0 then
-                    local mb_str = is_magic_burst and ' (MB!)' or ''
-                    log(string.format('Spell: %s - %d damage%s', spell_name, damage, mb_str))
-                elseif resisted then
-                    log(string.format('Spell: %s - RESISTED', spell_name))
-                elseif landed then
-                    log(string.format('Spell: %s - Landed', spell_name))
+                if settings.parse_to_chat then
+                    if damage > 0 then
+                        local mb_str = is_magic_burst and ' (MB!)' or ''
+                        log(string.format('Spell: %s - %d damage%s', spell_name, damage, mb_str))
+                    elseif resisted then
+                        log(string.format('Spell: %s - RESISTED', spell_name))
+                    elseif landed then
+                        log(string.format('Spell: %s - Landed', spell_name))
+                    end
+                end
+            elseif is_trust then
+                local trust_name = get_trust_name(act.actor_id)
+                tracker.record_trust_spell(state.current_fight, state.session_stats, trust_name, {
+                    name = spell_name,
+                    type = spell_type,
+                    damage = damage,
+                    landed = landed,
+                    resisted = resisted
+                })
+
+                if settings.parse_to_chat then
+                    if damage > 0 then
+                        local mb_str = is_magic_burst and ' (MB!)' or ''
+                        log(string.format('[%s] Spell: %s - %d damage%s', trust_name, spell_name, damage, mb_str))
+                    end
+                end
+            elseif is_pet then
+                local pet_name = get_pet_name()
+                tracker.record_pet_spell(state.current_fight, state.session_stats, pet_name, {
+                    name = spell_name,
+                    type = spell_type,
+                    damage = damage,
+                    landed = landed,
+                    resisted = resisted
+                })
+
+                if settings.parse_to_chat then
+                    if damage > 0 then
+                        local mb_str = is_magic_burst and ' (MB!)' or ''
+                        log(string.format('[%s] Spell: %s - %d damage%s', pet_name, spell_name, damage, mb_str))
+                    end
                 end
             end
         end
@@ -390,7 +586,11 @@ local function process_spell_action(act)
 end
 
 local function process_job_ability_action(act)
-    if not is_player_action(act.actor_id) then return end
+    local is_player = is_player_action(act.actor_id)
+    local is_trust = is_trust_action(act.actor_id)
+    local is_pet = is_pet_action(act.actor_id)
+
+    if not is_player and not is_trust and not is_pet then return end
 
     -- Job abilities that deal damage (like Jump)
     local ability = res.job_abilities[act.param]
@@ -404,13 +604,35 @@ local function process_job_ability_action(act)
             local damage = action.param or 0
 
             if damage > 0 then
-                tracker.record_ability(state.current_fight, state.session_stats, {
-                    name = ability_name,
-                    damage = damage
-                })
+                if is_player then
+                    tracker.record_ability(state.current_fight, state.session_stats, {
+                        name = ability_name,
+                        damage = damage
+                    })
 
-                if settings.parse_to_chat then
-                    log(string.format('JA: %s - %d damage', ability_name, damage))
+                    if settings.parse_to_chat then
+                        log(string.format('JA: %s - %d damage', ability_name, damage))
+                    end
+                elseif is_trust then
+                    local trust_name = get_trust_name(act.actor_id)
+                    tracker.record_trust_ability(state.current_fight, state.session_stats, trust_name, {
+                        name = ability_name,
+                        damage = damage
+                    })
+
+                    if settings.parse_to_chat then
+                        log(string.format('[%s] JA: %s - %d damage', trust_name, ability_name, damage))
+                    end
+                elseif is_pet then
+                    local pet_name = get_pet_name()
+                    tracker.record_pet_ability(state.current_fight, state.session_stats, pet_name, {
+                        name = ability_name,
+                        damage = damage
+                    })
+
+                    if settings.parse_to_chat then
+                        log(string.format('[%s] JA: %s - %d damage', pet_name, ability_name, damage))
+                    end
                 end
             end
         end
@@ -426,6 +648,14 @@ end
 windower.register_event('action', function(act)
     if not state.player_id then
         get_player_info()
+    end
+
+    -- Periodically update trust/pet IDs (lightweight check)
+    if settings.track_trusts then
+        update_trust_ids()
+    end
+    if settings.track_pets then
+        update_pet_id()
     end
 
     local category = act.category
@@ -488,9 +718,13 @@ windower.register_event('addon command', function(...)
         log('  //stats spell [name] - Stats for spell')
         log('  //stats ws [name]    - Stats for weapon skill')
         log('  //stats session      - Session totals')
+        log('  //stats trusts       - Show trust damage stats')
+        log('  //stats pets         - Show pet damage stats')
         log('  //stats export       - Export to file')
         log('  //stats parse [on/off] - Toggle chat output')
         log('  //stats overlay [on/off] - Toggle overlay')
+        log('  //stats tracktrusts [on/off] - Toggle trust tracking')
+        log('  //stats trackpets [on/off] - Toggle pet tracking')
         log('  //stats clear        - Clear all history')
 
     elseif cmd == 'show' or cmd == '' then
@@ -644,6 +878,44 @@ windower.register_event('addon command', function(...)
         display.toggle_overlay(settings.overlay_enabled)
         log('Overlay: ' .. (settings.overlay_enabled and 'ON' or 'OFF'))
         settings:save()
+
+    elseif cmd == 'tracktrusts' then
+        if args[2] then
+            settings.track_trusts = (args[2]:lower() == 'on')
+        else
+            settings.track_trusts = not settings.track_trusts
+        end
+        if settings.track_trusts then
+            update_trust_ids()
+        end
+        log('Trust tracking: ' .. (settings.track_trusts and 'ON' or 'OFF'))
+        settings:save()
+
+    elseif cmd == 'trackpets' then
+        if args[2] then
+            settings.track_pets = (args[2]:lower() == 'on')
+        else
+            settings.track_pets = not settings.track_pets
+        end
+        if settings.track_pets then
+            update_pet_id()
+        end
+        log('Pet tracking: ' .. (settings.track_pets and 'ON' or 'OFF'))
+        settings:save()
+
+    elseif cmd == 'trusts' then
+        if state.current_fight then
+            display.show_trust_stats(state.current_fight, state.session_stats)
+        else
+            log('No current fight data.')
+        end
+
+    elseif cmd == 'pets' then
+        if state.current_fight then
+            display.show_pet_stats(state.current_fight, state.session_stats)
+        else
+            log('No current fight data.')
+        end
 
     elseif cmd == 'clear' then
         state.fight_history = {}

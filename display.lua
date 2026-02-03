@@ -123,6 +123,40 @@ function display.update(fight)
         end
     end
 
+    -- Trusts (show top 3 by damage)
+    local trust_list = {}
+    for trust_name, trust_data in pairs(fight.trusts or {}) do
+        if trust_data.total_damage > 0 then
+            table.insert(trust_list, { name = trust_name, data = trust_data })
+        end
+    end
+    table.sort(trust_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+    if #trust_list > 0 then
+        table.insert(lines, '--- Trusts ---')
+        for i = 1, math.min(3, #trust_list) do
+            local trust = trust_list[i]
+            table.insert(lines, string.format('%s: %d dmg',
+                trust.name:sub(1, 12), trust.data.total_damage))
+        end
+    end
+
+    -- Pets (show all since usually only one)
+    local pet_list = {}
+    for pet_name, pet_data in pairs(fight.pets or {}) do
+        if pet_data.total_damage > 0 then
+            table.insert(pet_list, { name = pet_name, data = pet_data })
+        end
+    end
+
+    if #pet_list > 0 then
+        table.insert(lines, '--- Pets ---')
+        for _, pet in ipairs(pet_list) do
+            table.insert(lines, string.format('%s: %d dmg',
+                pet.name:sub(1, 12), pet.data.total_damage))
+        end
+    end
+
     overlay:text(table.concat(lines, '\n'))
     overlay:show()
 end
@@ -304,6 +338,60 @@ function display.show_detailed(fight)
                 ability_data.min_damage or 0, ability_data.max_damage))
         end
     end
+
+    -- Trust stats
+    local has_trusts = false
+    for _ in pairs(fight.trusts or {}) do has_trusts = true break end
+
+    if has_trusts then
+        log('--- Trusts ---')
+        local trust_list = {}
+        for name, data in pairs(fight.trusts) do
+            table.insert(trust_list, { name = name, data = data })
+        end
+        table.sort(trust_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+        for _, trust in ipairs(trust_list) do
+            local data = trust.data
+            log(string.format('  %s: %d total damage', trust.name, data.total_damage))
+            if data.melee_swings > 0 then
+                local acc = math.floor((data.melee_hits / data.melee_swings) * 100)
+                log(string.format('    Melee: %d dmg (%d%% acc, %d/%d)',
+                    data.melee_damage, acc, data.melee_hits, data.melee_swings))
+            end
+            if data.ws_uses > 0 then
+                log(string.format('    WS: %d dmg (%d uses)', data.ws_damage, data.ws_uses))
+            end
+            if data.spell_casts > 0 then
+                log(string.format('    Spells: %d dmg (%d casts)', data.spell_damage, data.spell_casts))
+            end
+        end
+    end
+
+    -- Pet stats
+    local has_pets = false
+    for _ in pairs(fight.pets or {}) do has_pets = true break end
+
+    if has_pets then
+        log('--- Pets ---')
+        for pet_name, data in pairs(fight.pets) do
+            log(string.format('  %s: %d total damage', pet_name, data.total_damage))
+            if data.melee_swings > 0 then
+                local acc = math.floor((data.melee_hits / data.melee_swings) * 100)
+                log(string.format('    Melee: %d dmg (%d%% acc, %d/%d)',
+                    data.melee_damage, acc, data.melee_hits, data.melee_swings))
+            end
+            if data.ws_uses > 0 then
+                log(string.format('    WS: %d dmg (%d uses)', data.ws_damage, data.ws_uses))
+            end
+            if data.spell_casts > 0 then
+                log(string.format('    Spells: %d dmg (%d casts)', data.spell_damage, data.spell_casts))
+            end
+            if data.ability_uses > 0 then
+                log(string.format('    Abilities: %d dmg (%d uses)', data.ability_damage, data.ability_uses))
+            end
+        end
+    end
 end
 
 function display.show_spell_stats(session, spell_name)
@@ -359,6 +447,122 @@ function display.show_ws_stats(session, ws_name)
 
     if not found then
         log('No data found for weapon skill: ' .. ws_name)
+    end
+end
+
+function display.show_trust_stats(fight, session)
+    log('=== Trust Damage Stats ===')
+
+    -- Current fight trusts
+    local has_fight_trusts = false
+    for _ in pairs(fight.trusts or {}) do has_fight_trusts = true break end
+
+    if has_fight_trusts then
+        log('--- Current Fight ---')
+        local trust_list = {}
+        for name, data in pairs(fight.trusts) do
+            table.insert(trust_list, { name = name, data = data })
+        end
+        table.sort(trust_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+        for _, trust in ipairs(trust_list) do
+            local data = trust.data
+            log(string.format('%s: %d total damage', trust.name, data.total_damage))
+            if data.melee_swings > 0 then
+                local acc = math.floor((data.melee_hits / data.melee_swings) * 100)
+                log(string.format('  Melee: %d dmg (%d%% acc)', data.melee_damage, acc))
+            end
+            if data.ranged_shots > 0 then
+                local acc = math.floor((data.ranged_hits / data.ranged_shots) * 100)
+                log(string.format('  Ranged: %d dmg (%d%% acc)', data.ranged_damage, acc))
+            end
+            if data.ws_uses > 0 then
+                log(string.format('  WS: %d dmg (%d uses)', data.ws_damage, data.ws_uses))
+            end
+            if data.spell_casts > 0 then
+                log(string.format('  Spells: %d dmg (%d casts)', data.spell_damage, data.spell_casts))
+            end
+            if data.ability_uses > 0 then
+                log(string.format('  Abilities: %d dmg (%d uses)', data.ability_damage, data.ability_uses))
+            end
+        end
+    else
+        log('No trust damage in current fight.')
+    end
+
+    -- Session trusts
+    local has_session_trusts = false
+    for _ in pairs(session.trusts or {}) do has_session_trusts = true break end
+
+    if has_session_trusts then
+        log('--- Session Totals ---')
+        local trust_list = {}
+        for name, data in pairs(session.trusts) do
+            table.insert(trust_list, { name = name, data = data })
+        end
+        table.sort(trust_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+        for _, trust in ipairs(trust_list) do
+            log(string.format('%s: %d total damage', trust.name, trust.data.total_damage))
+        end
+    end
+end
+
+function display.show_pet_stats(fight, session)
+    log('=== Pet Damage Stats ===')
+
+    -- Current fight pets
+    local has_fight_pets = false
+    for _ in pairs(fight.pets or {}) do has_fight_pets = true break end
+
+    if has_fight_pets then
+        log('--- Current Fight ---')
+        local pet_list = {}
+        for name, data in pairs(fight.pets) do
+            table.insert(pet_list, { name = name, data = data })
+        end
+        table.sort(pet_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+        for _, pet in ipairs(pet_list) do
+            local data = pet.data
+            log(string.format('%s: %d total damage', pet.name, data.total_damage))
+            if data.melee_swings > 0 then
+                local acc = math.floor((data.melee_hits / data.melee_swings) * 100)
+                log(string.format('  Melee: %d dmg (%d%% acc)', data.melee_damage, acc))
+            end
+            if data.ranged_shots > 0 then
+                local acc = math.floor((data.ranged_hits / data.ranged_shots) * 100)
+                log(string.format('  Ranged: %d dmg (%d%% acc)', data.ranged_damage, acc))
+            end
+            if data.ws_uses > 0 then
+                log(string.format('  WS: %d dmg (%d uses)', data.ws_damage, data.ws_uses))
+            end
+            if data.spell_casts > 0 then
+                log(string.format('  Spells: %d dmg (%d casts)', data.spell_damage, data.spell_casts))
+            end
+            if data.ability_uses > 0 then
+                log(string.format('  Abilities: %d dmg (%d uses)', data.ability_damage, data.ability_uses))
+            end
+        end
+    else
+        log('No pet damage in current fight.')
+    end
+
+    -- Session pets
+    local has_session_pets = false
+    for _ in pairs(session.pets or {}) do has_session_pets = true break end
+
+    if has_session_pets then
+        log('--- Session Totals ---')
+        local pet_list = {}
+        for name, data in pairs(session.pets) do
+            table.insert(pet_list, { name = name, data = data })
+        end
+        table.sort(pet_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+        for _, pet in ipairs(pet_list) do
+            log(string.format('%s: %d total damage', pet.name, pet.data.total_damage))
+        end
     end
 end
 
@@ -447,6 +651,47 @@ function display.show_session(session)
                 log(string.format('    %s: %d%% (%d casts)',
                     enfeebs[i].name, enfeebs[i].acc, enfeebs[i].casts))
             end
+        end
+    end
+
+    -- Trust summary
+    local trust_count = 0
+    local trust_total_damage = 0
+    for _, data in pairs(session.trusts or {}) do
+        trust_count = trust_count + 1
+        trust_total_damage = trust_total_damage + data.total_damage
+    end
+
+    if trust_count > 0 then
+        log('--- Trusts ---')
+        log(string.format('  Trusts Used: %d | Total Damage: %d', trust_count, trust_total_damage))
+
+        local trust_list = {}
+        for name, data in pairs(session.trusts) do
+            table.insert(trust_list, { name = name, data = data })
+        end
+        table.sort(trust_list, function(a, b) return a.data.total_damage > b.data.total_damage end)
+
+        for i = 1, math.min(5, #trust_list) do
+            local trust = trust_list[i]
+            log(string.format('    %s: %d damage', trust.name, trust.data.total_damage))
+        end
+    end
+
+    -- Pet summary
+    local pet_count = 0
+    local pet_total_damage = 0
+    for _, data in pairs(session.pets or {}) do
+        pet_count = pet_count + 1
+        pet_total_damage = pet_total_damage + data.total_damage
+    end
+
+    if pet_count > 0 then
+        log('--- Pets ---')
+        log(string.format('  Pets Used: %d | Total Damage: %d', pet_count, pet_total_damage))
+
+        for name, data in pairs(session.pets) do
+            log(string.format('    %s: %d damage', name, data.total_damage))
         end
     end
 end

@@ -53,6 +53,12 @@ function tracker.create_fight_stats(enemy_name, enemy_id)
 
         -- DPS tracking
         damage_samples = {},  -- For calculating DPS over time
+
+        -- Trust stats: [trust_name] = { total_damage, melee_damage, ranged_damage, ws_damage, spell_damage, ability_damage }
+        trusts = {},
+
+        -- Pet stats: [pet_name] = { total_damage, melee_damage, ranged_damage, ws_damage, spell_damage, ability_damage }
+        pets = {},
     }
 end
 
@@ -77,7 +83,9 @@ function tracker.create_session_stats()
         weaponskills = {},  -- [ws_name] = { uses, hits, misses, total_damage, min, max, avg }
         spells = {},        -- [spell_name] = { casts, landed, resisted, total_damage, min, max }
         abilities = {},     -- [ability_name] = { uses, total_damage, min, max }
-        enemies = {}        -- [enemy_name] = { fights, total_damage, ... }
+        enemies = {},       -- [enemy_name] = { fights, total_damage, ... }
+        trusts = {},        -- [trust_name] = { total_damage, melee_damage, ... }
+        pets = {}           -- [pet_name] = { total_damage, melee_damage, ... }
     }
 end
 
@@ -376,6 +384,282 @@ function tracker.record_ability(fight, session, data)
 end
 
 -------------------------------------------
+-- Trust/Pet Helper Functions
+-------------------------------------------
+
+-- Initialize trust stats structure
+local function ensure_trust_stats(fight, session, trust_name)
+    if not fight.trusts[trust_name] then
+        fight.trusts[trust_name] = {
+            total_damage = 0,
+            melee_damage = 0,
+            melee_hits = 0,
+            melee_swings = 0,
+            ranged_damage = 0,
+            ranged_hits = 0,
+            ranged_shots = 0,
+            ws_damage = 0,
+            ws_uses = 0,
+            spell_damage = 0,
+            spell_casts = 0,
+            ability_damage = 0,
+            ability_uses = 0
+        }
+    end
+    if not session.trusts[trust_name] then
+        session.trusts[trust_name] = {
+            total_damage = 0,
+            melee_damage = 0,
+            melee_hits = 0,
+            melee_swings = 0,
+            ranged_damage = 0,
+            ranged_hits = 0,
+            ranged_shots = 0,
+            ws_damage = 0,
+            ws_uses = 0,
+            spell_damage = 0,
+            spell_casts = 0,
+            ability_damage = 0,
+            ability_uses = 0
+        }
+    end
+end
+
+-- Initialize pet stats structure
+local function ensure_pet_stats(fight, session, pet_name)
+    if not fight.pets[pet_name] then
+        fight.pets[pet_name] = {
+            total_damage = 0,
+            melee_damage = 0,
+            melee_hits = 0,
+            melee_swings = 0,
+            ranged_damage = 0,
+            ranged_hits = 0,
+            ranged_shots = 0,
+            ws_damage = 0,
+            ws_uses = 0,
+            spell_damage = 0,
+            spell_casts = 0,
+            ability_damage = 0,
+            ability_uses = 0
+        }
+    end
+    if not session.pets[pet_name] then
+        session.pets[pet_name] = {
+            total_damage = 0,
+            melee_damage = 0,
+            melee_hits = 0,
+            melee_swings = 0,
+            ranged_damage = 0,
+            ranged_hits = 0,
+            ranged_shots = 0,
+            ws_damage = 0,
+            ws_uses = 0,
+            spell_damage = 0,
+            spell_casts = 0,
+            ability_damage = 0,
+            ability_uses = 0
+        }
+    end
+end
+
+-------------------------------------------
+-- Trust Recording Functions
+-------------------------------------------
+
+function tracker.record_trust_melee(fight, session, trust_name, data)
+    if not fight then return end
+    ensure_trust_stats(fight, session, trust_name)
+
+    local fight_trust = fight.trusts[trust_name]
+    local session_trust = session.trusts[trust_name]
+
+    fight_trust.melee_swings = fight_trust.melee_swings + 1
+    session_trust.melee_swings = session_trust.melee_swings + 1
+
+    if data.hit and data.damage > 0 then
+        fight_trust.melee_hits = fight_trust.melee_hits + 1
+        fight_trust.melee_damage = fight_trust.melee_damage + data.damage
+        fight_trust.total_damage = fight_trust.total_damage + data.damage
+        session_trust.melee_hits = session_trust.melee_hits + 1
+        session_trust.melee_damage = session_trust.melee_damage + data.damage
+        session_trust.total_damage = session_trust.total_damage + data.damage
+    end
+end
+
+function tracker.record_trust_ranged(fight, session, trust_name, data)
+    if not fight then return end
+    ensure_trust_stats(fight, session, trust_name)
+
+    local fight_trust = fight.trusts[trust_name]
+    local session_trust = session.trusts[trust_name]
+
+    fight_trust.ranged_shots = fight_trust.ranged_shots + 1
+    session_trust.ranged_shots = session_trust.ranged_shots + 1
+
+    if data.hit and data.damage > 0 then
+        fight_trust.ranged_hits = fight_trust.ranged_hits + 1
+        fight_trust.ranged_damage = fight_trust.ranged_damage + data.damage
+        fight_trust.total_damage = fight_trust.total_damage + data.damage
+        session_trust.ranged_hits = session_trust.ranged_hits + 1
+        session_trust.ranged_damage = session_trust.ranged_damage + data.damage
+        session_trust.total_damage = session_trust.total_damage + data.damage
+    end
+end
+
+function tracker.record_trust_weaponskill(fight, session, trust_name, data)
+    if not fight then return end
+    ensure_trust_stats(fight, session, trust_name)
+
+    local fight_trust = fight.trusts[trust_name]
+    local session_trust = session.trusts[trust_name]
+
+    fight_trust.ws_uses = fight_trust.ws_uses + 1
+    session_trust.ws_uses = session_trust.ws_uses + 1
+
+    if data.hit and data.damage > 0 then
+        fight_trust.ws_damage = fight_trust.ws_damage + data.damage
+        fight_trust.total_damage = fight_trust.total_damage + data.damage
+        session_trust.ws_damage = session_trust.ws_damage + data.damage
+        session_trust.total_damage = session_trust.total_damage + data.damage
+    end
+end
+
+function tracker.record_trust_spell(fight, session, trust_name, data)
+    if not fight then return end
+    ensure_trust_stats(fight, session, trust_name)
+
+    local fight_trust = fight.trusts[trust_name]
+    local session_trust = session.trusts[trust_name]
+
+    fight_trust.spell_casts = fight_trust.spell_casts + 1
+    session_trust.spell_casts = session_trust.spell_casts + 1
+
+    if data.damage > 0 then
+        fight_trust.spell_damage = fight_trust.spell_damage + data.damage
+        fight_trust.total_damage = fight_trust.total_damage + data.damage
+        session_trust.spell_damage = session_trust.spell_damage + data.damage
+        session_trust.total_damage = session_trust.total_damage + data.damage
+    end
+end
+
+function tracker.record_trust_ability(fight, session, trust_name, data)
+    if not fight then return end
+    ensure_trust_stats(fight, session, trust_name)
+
+    local fight_trust = fight.trusts[trust_name]
+    local session_trust = session.trusts[trust_name]
+
+    fight_trust.ability_uses = fight_trust.ability_uses + 1
+    session_trust.ability_uses = session_trust.ability_uses + 1
+
+    if data.damage > 0 then
+        fight_trust.ability_damage = fight_trust.ability_damage + data.damage
+        fight_trust.total_damage = fight_trust.total_damage + data.damage
+        session_trust.ability_damage = session_trust.ability_damage + data.damage
+        session_trust.total_damage = session_trust.total_damage + data.damage
+    end
+end
+
+-------------------------------------------
+-- Pet Recording Functions
+-------------------------------------------
+
+function tracker.record_pet_melee(fight, session, pet_name, data)
+    if not fight then return end
+    ensure_pet_stats(fight, session, pet_name)
+
+    local fight_pet = fight.pets[pet_name]
+    local session_pet = session.pets[pet_name]
+
+    fight_pet.melee_swings = fight_pet.melee_swings + 1
+    session_pet.melee_swings = session_pet.melee_swings + 1
+
+    if data.hit and data.damage > 0 then
+        fight_pet.melee_hits = fight_pet.melee_hits + 1
+        fight_pet.melee_damage = fight_pet.melee_damage + data.damage
+        fight_pet.total_damage = fight_pet.total_damage + data.damage
+        session_pet.melee_hits = session_pet.melee_hits + 1
+        session_pet.melee_damage = session_pet.melee_damage + data.damage
+        session_pet.total_damage = session_pet.total_damage + data.damage
+    end
+end
+
+function tracker.record_pet_ranged(fight, session, pet_name, data)
+    if not fight then return end
+    ensure_pet_stats(fight, session, pet_name)
+
+    local fight_pet = fight.pets[pet_name]
+    local session_pet = session.pets[pet_name]
+
+    fight_pet.ranged_shots = fight_pet.ranged_shots + 1
+    session_pet.ranged_shots = session_pet.ranged_shots + 1
+
+    if data.hit and data.damage > 0 then
+        fight_pet.ranged_hits = fight_pet.ranged_hits + 1
+        fight_pet.ranged_damage = fight_pet.ranged_damage + data.damage
+        fight_pet.total_damage = fight_pet.total_damage + data.damage
+        session_pet.ranged_hits = session_pet.ranged_hits + 1
+        session_pet.ranged_damage = session_pet.ranged_damage + data.damage
+        session_pet.total_damage = session_pet.total_damage + data.damage
+    end
+end
+
+function tracker.record_pet_weaponskill(fight, session, pet_name, data)
+    if not fight then return end
+    ensure_pet_stats(fight, session, pet_name)
+
+    local fight_pet = fight.pets[pet_name]
+    local session_pet = session.pets[pet_name]
+
+    fight_pet.ws_uses = fight_pet.ws_uses + 1
+    session_pet.ws_uses = session_pet.ws_uses + 1
+
+    if data.hit and data.damage > 0 then
+        fight_pet.ws_damage = fight_pet.ws_damage + data.damage
+        fight_pet.total_damage = fight_pet.total_damage + data.damage
+        session_pet.ws_damage = session_pet.ws_damage + data.damage
+        session_pet.total_damage = session_pet.total_damage + data.damage
+    end
+end
+
+function tracker.record_pet_spell(fight, session, pet_name, data)
+    if not fight then return end
+    ensure_pet_stats(fight, session, pet_name)
+
+    local fight_pet = fight.pets[pet_name]
+    local session_pet = session.pets[pet_name]
+
+    fight_pet.spell_casts = fight_pet.spell_casts + 1
+    session_pet.spell_casts = session_pet.spell_casts + 1
+
+    if data.damage > 0 then
+        fight_pet.spell_damage = fight_pet.spell_damage + data.damage
+        fight_pet.total_damage = fight_pet.total_damage + data.damage
+        session_pet.spell_damage = session_pet.spell_damage + data.damage
+        session_pet.total_damage = session_pet.total_damage + data.damage
+    end
+end
+
+function tracker.record_pet_ability(fight, session, pet_name, data)
+    if not fight then return end
+    ensure_pet_stats(fight, session, pet_name)
+
+    local fight_pet = fight.pets[pet_name]
+    local session_pet = session.pets[pet_name]
+
+    fight_pet.ability_uses = fight_pet.ability_uses + 1
+    session_pet.ability_uses = session_pet.ability_uses + 1
+
+    if data.damage > 0 then
+        fight_pet.ability_damage = fight_pet.ability_damage + data.damage
+        fight_pet.total_damage = fight_pet.total_damage + data.damage
+        session_pet.ability_damage = session_pet.ability_damage + data.damage
+        session_pet.total_damage = session_pet.total_damage + data.damage
+    end
+end
+
+-------------------------------------------
 -- Utility Functions
 -------------------------------------------
 
@@ -473,6 +757,58 @@ function tracker.combine_stats(dest, source)
         if ability_data.max_damage > dest_ability.max_damage then
             dest_ability.max_damage = ability_data.max_damage
         end
+    end
+
+    -- Trusts
+    for trust_name, trust_data in pairs(source.trusts or {}) do
+        if not dest.trusts[trust_name] then
+            dest.trusts[trust_name] = {
+                total_damage = 0, melee_damage = 0, melee_hits = 0, melee_swings = 0,
+                ranged_damage = 0, ranged_hits = 0, ranged_shots = 0,
+                ws_damage = 0, ws_uses = 0, spell_damage = 0, spell_casts = 0,
+                ability_damage = 0, ability_uses = 0
+            }
+        end
+        local dest_trust = dest.trusts[trust_name]
+        dest_trust.total_damage = dest_trust.total_damage + trust_data.total_damage
+        dest_trust.melee_damage = dest_trust.melee_damage + trust_data.melee_damage
+        dest_trust.melee_hits = dest_trust.melee_hits + trust_data.melee_hits
+        dest_trust.melee_swings = dest_trust.melee_swings + trust_data.melee_swings
+        dest_trust.ranged_damage = dest_trust.ranged_damage + trust_data.ranged_damage
+        dest_trust.ranged_hits = dest_trust.ranged_hits + trust_data.ranged_hits
+        dest_trust.ranged_shots = dest_trust.ranged_shots + trust_data.ranged_shots
+        dest_trust.ws_damage = dest_trust.ws_damage + trust_data.ws_damage
+        dest_trust.ws_uses = dest_trust.ws_uses + trust_data.ws_uses
+        dest_trust.spell_damage = dest_trust.spell_damage + trust_data.spell_damage
+        dest_trust.spell_casts = dest_trust.spell_casts + trust_data.spell_casts
+        dest_trust.ability_damage = dest_trust.ability_damage + trust_data.ability_damage
+        dest_trust.ability_uses = dest_trust.ability_uses + trust_data.ability_uses
+    end
+
+    -- Pets
+    for pet_name, pet_data in pairs(source.pets or {}) do
+        if not dest.pets[pet_name] then
+            dest.pets[pet_name] = {
+                total_damage = 0, melee_damage = 0, melee_hits = 0, melee_swings = 0,
+                ranged_damage = 0, ranged_hits = 0, ranged_shots = 0,
+                ws_damage = 0, ws_uses = 0, spell_damage = 0, spell_casts = 0,
+                ability_damage = 0, ability_uses = 0
+            }
+        end
+        local dest_pet = dest.pets[pet_name]
+        dest_pet.total_damage = dest_pet.total_damage + pet_data.total_damage
+        dest_pet.melee_damage = dest_pet.melee_damage + pet_data.melee_damage
+        dest_pet.melee_hits = dest_pet.melee_hits + pet_data.melee_hits
+        dest_pet.melee_swings = dest_pet.melee_swings + pet_data.melee_swings
+        dest_pet.ranged_damage = dest_pet.ranged_damage + pet_data.ranged_damage
+        dest_pet.ranged_hits = dest_pet.ranged_hits + pet_data.ranged_hits
+        dest_pet.ranged_shots = dest_pet.ranged_shots + pet_data.ranged_shots
+        dest_pet.ws_damage = dest_pet.ws_damage + pet_data.ws_damage
+        dest_pet.ws_uses = dest_pet.ws_uses + pet_data.ws_uses
+        dest_pet.spell_damage = dest_pet.spell_damage + pet_data.spell_damage
+        dest_pet.spell_casts = dest_pet.spell_casts + pet_data.spell_casts
+        dest_pet.ability_damage = dest_pet.ability_damage + pet_data.ability_damage
+        dest_pet.ability_uses = dest_pet.ability_uses + pet_data.ability_uses
     end
 end
 
