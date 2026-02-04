@@ -19,6 +19,8 @@ Unlike other parsing tools that aggregate all combat data together, Stats keeps 
 - **Magic Accuracy** - Track how often enfeebling spells land vs resist
 - **Spell Damage** - Min/max/average damage for nukes
 - **Job Ability Tracking** - Damage from abilities like Jump, Chi Blast, etc.
+- **Trust Tracking** - Track damage dealt by your trusts (optional)
+- **Pet Tracking** - Track damage dealt by your pet (BST, SMN, PUP, DRG wyvern, etc.)
 - **Fight History** - Review past fights and compare performance
 - **Enemy Aggregation** - Combine stats across all fights with the same enemy type
 - **Real-Time Overlay** - Draggable on-screen display showing current fight stats
@@ -53,9 +55,13 @@ Windower/addons/Stats/
 | `//stats spell <name>` | Show accuracy/damage for a specific spell |
 | `//stats ws <name>` | Show stats for a specific weapon skill |
 | `//stats session` | Show session-wide totals |
+| `//stats trusts` | Show trust damage statistics |
+| `//stats pets` | Show pet damage statistics |
 | `//stats export [filename]` | Export stats to a text file |
 | `//stats parse [on/off]` | Toggle live damage output to chat |
 | `//stats overlay [on/off]` | Toggle on-screen overlay |
+| `//stats tracktrusts [on/off]` | Toggle trust damage tracking |
+| `//stats trackpets [on/off]` | Toggle pet damage tracking |
 | `//stats clear` | Clear all history and session data |
 | `//stats help` | Display command help |
 
@@ -150,6 +156,64 @@ Savage Blade:
   Min: 3200 / Max: 6800 / Avg: 4400
 ```
 
+### Trust and Pet Tracking
+
+Stats can optionally track damage dealt by your trusts and pets. This is disabled by default to keep the display clean, but can be enabled when you want to see the full picture.
+
+**Enable trust tracking:**
+```
+//stats tracktrusts on
+```
+
+**Enable pet tracking:**
+```
+//stats trackpets on
+```
+
+Once enabled, trust and pet damage will appear in the overlay, detailed reports, and session summaries.
+
+**View trust damage breakdown:**
+```
+//stats trusts
+```
+
+Output:
+```
+=== Trust Damage Stats ===
+--- Current Fight ---
+Shantotto II: 45000 total damage
+  Melee: 12000 dmg (89% acc)
+  Spells: 33000 dmg (15 casts)
+Zeid II: 38000 total damage
+  Melee: 25000 dmg (92% acc)
+  WS: 13000 dmg (4 uses)
+--- Session Totals ---
+Shantotto II: 125000 total damage
+Zeid II: 98000 total damage
+```
+
+**View pet damage breakdown:**
+```
+//stats pets
+```
+
+Output:
+```
+=== Pet Damage Stats ===
+--- Current Fight ---
+Garuda: 28000 total damage
+  Melee: 8000 dmg (85% acc)
+  Abilities: 20000 dmg (6 uses)
+--- Session Totals ---
+Garuda: 156000 total damage
+```
+
+**Supported pet types:**
+- Beastmaster pets (jug pets and charmed)
+- Summoner avatars
+- Puppetmaster automatons
+- Dragoon wyverns
+
 ## Understanding the Statistics
 
 ### Melee Accuracy
@@ -196,6 +260,8 @@ Settings are automatically saved and include:
 |---------|---------|-------------|
 | `parse_to_chat` | false | Show damage numbers in chat log |
 | `overlay_enabled` | true | Show on-screen overlay |
+| `track_trusts` | false | Track damage dealt by trusts |
+| `track_pets` | false | Track damage dealt by pets |
 | `auto_reset_on_new_fight` | true | Auto-reset when engaging new enemy |
 | `history_limit` | 50 | Maximum fights to keep in history |
 
@@ -210,6 +276,10 @@ Settings are automatically saved and include:
 4. **Export before logging** - Use `//stats export` to save your session data
 
 5. **Reset between tests** - Use `//stats reset` when changing gear to get clean comparisons
+
+6. **Track trust contributions** - Enable trust tracking to see which trusts deal the most damage and help with party composition decisions
+
+7. **Monitor pet performance** - BST, SMN, PUP, and DRG players can track pet damage to compare pet setups and ability usage
 
 ## Troubleshooting
 
@@ -226,6 +296,13 @@ Settings are automatically saved and include:
 - Critical hits are tracked separately from normal hits for min/max
 
 ## Changelog
+
+### Version 1.1.0
+- Added trust damage tracking (optional, enable with `//stats tracktrusts on`)
+- Added pet damage tracking (optional, enable with `//stats trackpets on`)
+- New commands: `//stats trusts`, `//stats pets`, `//stats tracktrusts`, `//stats trackpets`
+- Trust and pet stats now appear in overlay, detailed reports, and session summaries
+- Tracks melee, ranged, weapon skills, spells, and abilities for trusts/pets
 
 ### Version 1.0.0
 - Initial release

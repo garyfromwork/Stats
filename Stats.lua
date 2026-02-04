@@ -20,7 +20,7 @@
 
 _addon.name = 'Stats'
 _addon.author = 'Garyfromwork'
-_addon.version = '1.0.0'
+_addon.version = '1.1.0'
 _addon.commands = {'stats', 'st'}
 
 require('tables')
@@ -108,10 +108,10 @@ end
 local function update_pet_id()
     state.pet_id = nil
     local player = windower.ffxi.get_player()
-    if player then
-        local pet_index = windower.ffxi.get_mob_by_target('pet')
-        if pet_index then
-            state.pet_id = pet_index.id
+    if player and player.pet_index and player.pet_index > 0 then
+        local pet = windower.ffxi.get_mob_by_index(player.pet_index)
+        if pet then
+            state.pet_id = pet.id
         end
     end
 end
