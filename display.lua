@@ -25,25 +25,18 @@ local settings_ref = nil
 
 function display.init(settings)
     settings_ref = settings
-
-    overlay = texts.new('', overlay_settings)
-
-    if settings.overlay_position then
-        overlay:pos(settings.overlay_position.x, settings.overlay_position.y)
-    end
-
-    if settings.overlay_enabled then
-        overlay:show()
-    else
-        overlay:hide()
-    end
+    -- texts.pos updates this table while dragging, and texts saves root settings
+    -- when the mouse button is released.
+    overlay_settings.pos = settings.overlay_position
+    overlay = texts.new('', overlay_settings, settings)
+    display.update(nil)
 end
 
 -------------------------------------------
 -- Overlay Functions
 -------------------------------------------
 
-function display.update(fight)
+function display.update(fight, active_count)
     if not overlay then return end
     if not settings_ref or not settings_ref.overlay_enabled then
         overlay:hide()
@@ -59,7 +52,10 @@ function display.update(fight)
     local lines = {}
 
     -- Header with total damage
-    table.insert(lines, '=== ' .. fight.enemy_name .. ' ===')
+    table.insert(lines, string.format('=== %s (#%d) ===', fight.enemy_name, fight.enemy_id))
+    if active_count and active_count > 1 then
+        table.insert(lines, string.format('Active enemies: %d', active_count))
+    end
     table.insert(lines, string.format('Total Damage: %d', fight.total_damage or 0))
 
     -- Melee accuracy
@@ -168,6 +164,12 @@ function display.toggle_overlay(enabled)
         else
             overlay:hide()
         end
+    end
+end
+
+function display.reset_position(x, y)
+    if overlay then
+        overlay:pos(x, y)
     end
 end
 

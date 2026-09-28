@@ -1,34 +1,30 @@
 --[[
-    Stats - FFXI Windower Addon
-    Tracks combat statistics including accuracy, damage, and magic accuracy
+    Stats - FFXI Windower Addon (SQLite Searchable Version)
+    Tracks combat statistics into a local database broken down by Job/Subjob
+    Permanently archives fights to a local SQLite database for the whole party.
 
     Commands:
         //stats                     - Show current fight stats
-        //stats report              - Show detailed report
-        //stats reset               - Reset current fight stats
-        //stats history             - Show fight history
-        //stats enemy [name]        - Show stats for specific enemy type
-        //stats spell [name]        - Show stats for specific spell
-        //stats ws [name]           - Show stats for specific weapon skill
-        //stats session             - Show session totals
-        //stats export              - Export stats to file
-        //stats parse [on/off]      - Toggle chat parsing display
-        //stats overlay [on/off]    - Toggle on-screen overlay
-        //stats clear               - Clear all history
-        //stats help                - Show help
+        //stats active              - List enemies currently being tracked
+        //stats focus [enemy ID]    - Choose the enemy shown on the overlay
+        //stats reset               - Save and reset all active fights
+        //stats review              - Lists the last 10 fights from SQLite
+        //stats review [name]       - Search history by monster name or player name
+        //stats review [id]         - View deep breakdown of a specific past fight ID
+        //stats purge               - Clear history safely with confirmation
 ]]--
 
 _addon.name = 'Stats'
 _addon.author = 'Garyfromwork'
-_addon.version = '1.1.0'
+_addon.version = '1.5.0'
 _addon.commands = {'stats', 'st'}
 
 require('tables')
 require('strings')
 require('logger')
 local config = require('config')
-local texts = require('texts')
 local res = require('resources')
+local sqlite3 = require('sqlite3')
 
 -- Load sub-modules
 local tracker = require('tracker')
@@ -39,33 +35,193 @@ local defaults = {
     parse_to_chat = false,
     overlay_enabled = true,
     overlay_position = { x = 100, y = 100 },
-    track_party = false,  -- Only track self by default
-    track_trusts = false, -- Track trust damage
-    track_pets = false,   -- Track pet damage
-    auto_reset_on_new_fight = true,
-    history_limit = 50
+    track_party = true,
+    track_trusts = true,
+    track_pets = true
 }
 
 local settings = config.load(defaults)
-
--- Initialize display
 display.init(settings)
+local default_overlay_position = {x = defaults.overlay_position.x, y = defaults.overlay_position.y}
 
 -- State
 local state = {
     current_fight = nil,
-    fight_history = {},
+    active_fights = {}, -- [enemy_id] = fight
+    action_sequence = 0,
     session_stats = tracker.create_session_stats(),
     player_id = nil,
     player_name = nil,
-    trust_ids = {},   -- Table of trust mob IDs
-    pet_id = nil      -- Player's pet ID
+    party_members = {} -- Dynamically mapped cache: [id] = data table
 }
+
+-- Database Setup
+local db_path = windower.addon_path .. 'data/combat_history.db'
+if not windower.dir_exists(windower.addon_path .. 'data') then
+    windower.create_dir(windower.addon_path .. 'data')
+end
+local db = sqlite3.open(db_path)
+
+-- Initialize Database Tables (Permanent Storage with Defense metrics)
+db:exec([[
+    CREATE TABLE IF NOT EXISTS fights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        player_name TEXT,
+        main_job TEXT,
+        sub_job TEXT,
+        enemy_name TEXT,
+        timestamp INTEGER,
+        duration INTEGER,
+        result TEXT
+    );
+    CREATE TABLE IF NOT EXISTS damage_logs (
+        fight_id INTEGER,
+        source TEXT,
+        action_type TEXT,
+        total_damage INTEGER,
+        hits INTEGER,
+        swings INTEGER,
+        evaded_swings INTEGER DEFAULT 0,
+        parried_swings INTEGER DEFAULT 0,
+        blocked_swings INTEGER DEFAULT 0,
+        countered_swings INTEGER DEFAULT 0,
+        shadow_swings INTEGER DEFAULT 0,
+        total_attacks_received INTEGER DEFAULT 0
+    );
+]])
+
+-- Existing databases may predate defensive tracking. CREATE TABLE IF NOT EXISTS
+-- leaves their original six-column damage_logs table unchanged.
+local defense_columns = {
+    'evaded_swings',
+    'parried_swings',
+    'blocked_swings',
+    'countered_swings',
+    'shadow_swings',
+    'total_attacks_received'
+}
+local damage_columns = {}
+for row in db:nrows('PRAGMA table_info(damage_logs)') do
+    damage_columns[row.name] = true
+end
+for _, column in ipairs(defense_columns) do
+    if not damage_columns[column] then
+        local result = db:exec('ALTER TABLE damage_logs ADD COLUMN ' .. column .. ' INTEGER DEFAULT 0')
+        if result ~= sqlite3.OK then
+            error('Stats: Could not upgrade damage_logs: ' .. (db:errmsg() or 'unknown SQLite error'))
+        end
+    end
+end
+
+-------------------------------------------
+-- Database Logging Functions
+-------------------------------------------
+local function fight_has_data(fight)
+    return fight and (fight.total_swings > 0 or fight.ranged_shots > 0
+        or next(fight.weaponskills) or next(fight.spells) or next(fight.abilities)
+        or next(fight.trusts) or next(fight.pets)
+        or (fight.defense and next(fight.defense)))
+end
+
+local function save_fight_to_db(fight)
+    if not fight_has_data(fight) or fight.saved then return end
+
+    local player = windower.ffxi.get_player()
+    local main_job = player and res.jobs[player.main_job_id]
+    local sub_job = player and res.jobs[player.sub_job_id]
+    local duration = fight.end_time and (fight.end_time - fight.start_time) or (os.time() - fight.start_time)
+    local result = fight.result or 'Killed/Engaged'
+
+    -- 1. Insert Master Fight metadata
+    local stmt = db:prepare([[
+        INSERT INTO fights (player_name, main_job, sub_job, enemy_name, timestamp, duration, result)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+    ]])
+    if stmt then
+        stmt:bind_values(state.player_name or (player and player.name) or 'Unknown',
+            main_job and main_job.ens or 'Unknown', sub_job and sub_job.ens or 'NONE',
+            fight.enemy_name, fight.start_time, duration, result)
+        local result_code = stmt:step()
+        stmt:finalize()
+        if result_code ~= sqlite3.DONE then return end
+    else
+        return
+    end
+
+    fight.saved = true
+    local fight_id = db:last_insert_rowid()
+
+    -- Save each offensive category separately so a melee row reports melee damage.
+    local dmg_stmt = db:prepare([[
+        INSERT INTO damage_logs (fight_id, source, action_type, total_damage, hits, swings)
+        VALUES (?, ?, ?, ?, ?, ?);
+    ]])
+    if dmg_stmt then
+        local function insert_damage(source, action_type, damage, hits, attempts)
+            dmg_stmt:bind_values(fight_id, source, action_type, damage, hits, attempts)
+            dmg_stmt:step()
+            dmg_stmt:reset()
+        end
+        if fight.total_swings > 0 then
+            insert_damage('Player', 'Melee', fight.melee_damage, fight.total_hits, fight.total_swings)
+        end
+        if fight.ranged_shots > 0 then
+            insert_damage('Player', 'Ranged', fight.ranged_damage, fight.ranged_hits, fight.ranged_shots)
+        end
+        for name, data in pairs(fight.weaponskills) do
+            insert_damage('Player', 'Weapon Skill: ' .. name, data.total_damage, data.hits, data.uses)
+        end
+        for name, data in pairs(fight.spells) do
+            insert_damage('Player', 'Spell: ' .. name, data.total_damage, data.landed, data.casts)
+        end
+        for name, data in pairs(fight.abilities) do
+            insert_damage('Player', 'Ability: ' .. name, data.total_damage, data.uses, data.uses)
+        end
+        for name, data in pairs(fight.trusts) do
+            insert_damage(name, 'Trust', data.total_damage, data.melee_hits, data.melee_swings)
+        end
+        for name, data in pairs(fight.pets) do
+            insert_damage(name, 'Pet', data.total_damage, data.melee_hits, data.melee_swings)
+        end
+        dmg_stmt:finalize()
+    end
+
+    -- Save defensive metrics with one prepared statement for the whole fight.
+    if fight.defense and next(fight.defense) then
+        local def_stmt = db:prepare([[
+            INSERT INTO damage_logs (
+                fight_id, source, action_type, total_damage, hits, swings,
+                evaded_swings, parried_swings, blocked_swings, countered_swings, shadow_swings, total_attacks_received
+            )
+            VALUES (?, ?, 'Defense', 0, ?, ?, ?, ?, ?, ?, ?, ?);
+        ]])
+        if def_stmt then
+            for name, d in pairs(fight.defense) do
+                def_stmt:bind_values(
+                    fight_id,
+                    name,
+                    d.hits,
+                    d.swings,
+                    d.dodge,
+                    d.parry,
+                    d.block,
+                    d.counter,
+                    d.shadow,
+                    d.swings
+                )
+                def_stmt:step()
+                def_stmt:reset()
+            end
+            def_stmt:finalize()
+        else
+            log('Stats: Failed to save defense: ' .. (db:errmsg() or 'unknown SQLite error'))
+        end
+    end
+end
 
 -------------------------------------------
 -- Utility Functions
 -------------------------------------------
-
 local function get_player_info()
     local player = windower.ffxi.get_player()
     if player then
@@ -76,890 +232,515 @@ end
 
 local function get_mob_name(mob_id)
     local mob = windower.ffxi.get_mob_by_id(mob_id)
-    if mob then
-        return mob.name
-    end
-    return 'Unknown'
+    return mob and mob.name or 'Unknown'
 end
 
-local function is_player_action(actor_id)
-    return actor_id == state.player_id
-end
-
--- Update trust IDs from current party
-local function update_trust_ids()
-    state.trust_ids = {}
+local function update_party_cache()
+    state.party_members = {}
     local party = windower.ffxi.get_party()
-    if party then
-        for i = 0, 5 do
-            local member = party['p' .. i]
-            if member and member.mob then
-                local mob = windower.ffxi.get_mob_by_id(member.mob.id)
-                -- Trusts have spawn_type 14 (Trust) and are not the player
-                if mob and mob.spawn_type == 14 and mob.id ~= state.player_id then
-                    state.trust_ids[mob.id] = mob.name
+    if not party then return end
+
+    for i = 0, 5 do
+        local member = party['p' .. i]
+        if member and member.mob then
+            local mid = member.mob.id
+            local mname = member.mob.name
+            local spawn_type = member.mob.spawn_type
+
+            local is_trust = (spawn_type == 14)
+            local is_player = (mid == state.player_id)
+
+            state.party_members[mid] = {
+                name = mname,
+                is_player = is_player,
+                is_trust = is_trust,
+                is_other_player = (not is_player and not is_trust)
+            }
+
+            if settings.track_pets and member.mob.pet_index and member.mob.pet_index > 0 then
+                local pet = windower.ffxi.get_mob_by_index(member.mob.pet_index)
+                if pet then
+                    state.party_members[pet.id] = {
+                        name = pet.name,
+                        is_player = false,
+                        is_trust = false,
+                        is_other_player = false,
+                        is_pet = true,
+                        owner_name = mname
+                    }
                 end
             end
         end
     end
 end
 
--- Update pet ID from player's current pet
-local function update_pet_id()
-    state.pet_id = nil
-    local player = windower.ffxi.get_player()
-    if player and player.pet_index and player.pet_index > 0 then
-        local pet = windower.ffxi.get_mob_by_index(player.pet_index)
-        if pet then
-            state.pet_id = pet.id
+local function get_action_actor(actor_id)
+    if not state.party_members[actor_id] then
+        update_party_cache()
+    end
+    return state.party_members[actor_id]
+end
+
+local function active_fight_count()
+    local count = 0
+    for _ in pairs(state.active_fights) do count = count + 1 end
+    return count
+end
+
+local function most_recent_active_fight()
+    local most_recent = nil
+    for _, fight in pairs(state.active_fights) do
+        if not most_recent or fight.action_sequence > most_recent.action_sequence then
+            most_recent = fight
+        end
+    end
+    return most_recent
+end
+
+local function update_overlay()
+    display.update(state.current_fight, active_fight_count())
+end
+
+local function ensure_fight_exists(enemy_name, enemy_id, focus)
+    local fight = state.active_fights[enemy_id]
+    if not fight then
+        fight = tracker.create_fight_stats(enemy_name, enemy_id)
+        fight.defense = {}
+        state.active_fights[enemy_id] = fight
+        if settings.parse_to_chat then log('New fight started: ' .. enemy_name) end
+    elseif fight.enemy_name == 'Unknown' and enemy_name ~= 'Unknown' then
+        fight.enemy_name = enemy_name
+    end
+
+    state.action_sequence = state.action_sequence + 1
+    fight.action_sequence = state.action_sequence
+    fight.last_action_time = os.time()
+    if focus or not state.current_fight or state.current_fight.saved
+        or state.active_fights[state.current_fight.enemy_id] ~= state.current_fight then
+        state.current_fight = fight
+    end
+    return fight
+end
+
+local function finish_fight(enemy_id, result)
+    local fight = state.active_fights[enemy_id]
+    if not fight then return end
+
+    fight.result = result
+    fight.end_time = os.time()
+    save_fight_to_db(fight)
+    state.active_fights[enemy_id] = nil
+    if state.current_fight == fight then
+        state.current_fight = most_recent_active_fight() or (fight_has_data(fight) and fight or nil)
+    end
+    update_overlay()
+end
+
+local function finish_all_fights(result)
+    for enemy_id in pairs(state.active_fights) do
+        finish_fight(enemy_id, result)
+    end
+end
+
+local function expire_inactive_fights()
+    local now = os.time()
+    for enemy_id, fight in pairs(state.active_fights) do
+        if now - fight.last_action_time > 120 then
+            finish_fight(enemy_id, 'Timed out')
         end
     end
 end
 
--- Check if actor is a trust
-local function is_trust_action(actor_id)
-    if not settings.track_trusts then return false end
-    return state.trust_ids[actor_id] ~= nil
-end
-
--- Check if actor is the player's pet
-local function is_pet_action(actor_id)
-    if not settings.track_pets then return false end
-    return state.pet_id and actor_id == state.pet_id
-end
-
--- Get trust name by ID
-local function get_trust_name(actor_id)
-    return state.trust_ids[actor_id] or 'Unknown Trust'
-end
-
--- Get pet name
-local function get_pet_name()
-    if state.pet_id then
-        local pet = windower.ffxi.get_mob_by_id(state.pet_id)
-        if pet then return pet.name end
-    end
-    return 'Pet'
-end
-
-local function start_new_fight(enemy_name, enemy_id)
-    -- Save current fight to history if it has data
-    if state.current_fight and state.current_fight.total_swings > 0 then
-        table.insert(state.fight_history, 1, state.current_fight)
-
-        -- Limit history size
-        while #state.fight_history > settings.history_limit do
-            table.remove(state.fight_history)
-        end
-    end
-
-    state.current_fight = tracker.create_fight_stats(enemy_name, enemy_id)
-
-    if settings.parse_to_chat then
-        log('New fight started: ' .. enemy_name)
-    end
-end
-
-local function ensure_fight_exists(enemy_name, enemy_id)
-    if not state.current_fight then
-        start_new_fight(enemy_name, enemy_id)
-    elseif settings.auto_reset_on_new_fight and state.current_fight.enemy_id ~= enemy_id then
-        start_new_fight(enemy_name, enemy_id)
-    end
-end
-
 -------------------------------------------
--- Action Processing
+-- Action Processing Messages
 -------------------------------------------
+local hit_messages = { [1] = true, [67] = true, [352] = true, [353] = true, [576] = true, [577] = true }
+local crit_messages = { [67] = true, [353] = true }
+local miss_messages = { [15] = true, [63] = true, [30] = true, [32] = true, [69] = true, [70] = true, [354] = true, [355] = true }
+local ws_hit_messages = { [185] = true, [186] = true, [187] = true, [194] = true, [224] = true, [225] = true, [226] = true, [238] = true, [242] = true }
+local ws_miss_messages = { [188] = true, [189] = true }
+local spell_land_messages = { [2] = true, [7] = true, [82] = true, [227] = true, [228] = true, [230] = true, [236] = true, [237] = true, [252] = true, [268] = true, [271] = true }
+local spell_resist_messages = { [75] = true, [85] = true, [284] = true, [655] = true, [656] = true }
+local spell_no_effect_messages = { [75] = true, [283] = true }
 
--- Message ID references for determining hit/miss/etc
--- Reference: https://github.com/Windower/Resources/blob/master/resources_data/action_messages.lua
-local hit_messages = {
-    [1] = true,    -- Melee hit: "${actor} hits ${target} for ${number} points of damage."
-    [67] = true,   -- Critical hit: "${actor} scores a critical hit!${lb}${target} takes ${number} points of damage."
-    [352] = true,  -- Ranged hit: "${actor}'s ranged attack hits ${target} for ${number} points of damage."
-    [353] = true,  -- Ranged critical: "${actor}'s ranged attack scores a critical hit!"
-    [576] = true,  -- Ranged hit (squarely): "${actor}'s ranged attack hits ${target} squarely"
-    [577] = true,  -- Ranged strike true: "${actor}'s ranged attack strikes true, pummeling ${target}"
-}
-
-local crit_messages = {
-    [67] = true,   -- Melee critical hit
-    [353] = true,  -- Ranged critical hit
-}
-
-local miss_messages = {
-    [15] = true,   -- Miss: "${actor} misses ${target}."
-    [63] = true,   -- Miss (alternate): "${actor} misses ${target}."
-    [30] = true,   -- Anticipated: "${target} anticipates the attack."
-    [32] = true,   -- Dodged: "${target} dodges the attack."
-    [69] = true,   -- Blocked: "${target} blocks ${actor}'s attack with his shield."
-    [70] = true,   -- Parried: "${target} parries ${actor}'s attack with his weapon."
-    [354] = true,  -- Ranged miss: "${actor}'s ranged attack misses."
-    [355] = true,  -- Ranged no effect: "${actor}'s ranged attack has no effect on ${target}."
-}
-
-local ws_hit_messages = {
-    [185] = true,  -- WS damage: "${actor} uses ${weapon_skill}.${lb}${target} takes ${number} points of damage."
-    [186] = true,  -- WS status effect: "${actor} uses ${weapon_skill}.${lb}${target} gains the effect of ${status}."
-    [187] = true,  -- WS HP drain: "${actor} uses ${weapon_skill}.${lb}${number} HP drained from ${target}."
-    [194] = true,  -- WS status effect (alt): "${actor} uses ${weapon_skill}.${lb}${target} gains the effect of ${status}."
-    [224] = true,  -- WS MP recovery: "${actor} uses ${weapon_skill}.${lb}${target} recovers ${number} MP."
-    [225] = true,  -- WS MP drain: "${actor} uses ${weapon_skill}.${lb}${number} MP drained from ${target}."
-    [226] = true,  -- WS TP drain: "${actor} uses ${weapon_skill}.${lb}${number} TP drained from ${target}."
-    [238] = true,  -- WS HP recovery: "${actor} uses ${weapon_skill}.${lb}${target} recovers ${number} HP."
-    [242] = true,  -- WS status: "${actor} uses ${weapon_skill}.${lb}${target} is ${status}."
-}
-
-local ws_miss_messages = {
-    [188] = true,  -- WS miss: "${actor} uses ${weapon_skill}, but misses ${target}."
-    [189] = true,  -- WS no effect: "${actor} uses ${weapon_skill}.${lb}No effect on ${target}."
-}
-
-local spell_damage_messages = {
-    [2] = true,    -- Spell damage: "${actor} casts ${spell}.${lb}${target} takes ${number} points of damage."
-    [252] = true,  -- Magic Burst damage: "${actor} casts ${spell}.${lb}Magic Burst! ${target} takes ${number} points of damage."
-    [265] = true,  -- Magic Burst (alt): "Magic Burst! ${target} takes ${number} points of damage."
-    [274] = true,  -- Magic Burst HP drain: "${actor} casts ${spell}.${lb}Magic Burst! ${number} HP drained from ${target}."
-    [275] = true,  -- Magic Burst MP drain: "${actor} casts ${spell}.${lb}Magic Burst! ${number} MP drained from ${target}."
-}
-
-local spell_land_messages = {
-    [2] = true,    -- Spell damage
-    [7] = true,    -- HP recovery: "${actor} casts ${spell}.${lb}${target} recovers ${number} HP."
-    [82] = true,   -- Status applied: "${actor} casts ${spell}.${lb}${target} is ${status}!"
-    [227] = true,  -- HP drain: "${actor} casts ${spell}.${lb}${number} HP drained from ${target}."
-    [228] = true,  -- MP drain: "${actor} casts ${spell}.${lb}${number} MP drained from ${target}."
-    [230] = true,  -- Status gained: "${actor} casts ${spell}.${lb}${target} gains the effect of ${status}."
-    [236] = true,  -- Status applied (alt): "${actor} casts ${spell}.${lb}${target} is ${status}."
-    [237] = true,  -- Status received: "${actor} casts ${spell}.${lb}${target} receives the effect of ${status}."
-    [252] = true,  -- Magic Burst damage
-    [268] = true,  -- Magic Burst status: "${actor} casts ${spell}.${lb}Magic Burst! ${target} receives the effect of ${status}."
-    [271] = true,  -- Magic Burst status: "${actor} casts ${spell}.${lb}Magic Burst! ${target} is ${status}."
-}
-
-local spell_resist_messages = {
-    [75] = true,   -- No effect: "${actor}'s ${spell} has no effect on ${target}."
-    [85] = true,   -- Resisted: "${actor} casts ${spell}.${lb}${target} resists the spell."
-    [284] = true,  -- Resisted: "${target} resists the effects of the spell!"
-    [655] = true,  -- Completely resisted: "${actor} casts ${spell}.${lb}${target} completely resists the spell."
-    [656] = true,  -- Completely resisted (alt): "${target} completely resists the spell."
-}
-
-local spell_no_effect_messages = {
-    [75] = true,   -- No effect
-    [283] = true,  -- No effect: "No effect on ${target}."
-}
+-- Defensive Action Bit-Fields
+local dodge_messages = { [15] = true, [32] = true }
+local parry_messages = { [30] = true }
+local block_messages = { [23] = true, [353] = true }
+local counter_messages = { [33] = true }
+local shadow_messages = { [31] = true, [536] = true }
 
 local function process_melee_action(act)
-    local is_player = is_player_action(act.actor_id)
-    local is_trust = is_trust_action(act.actor_id)
-    local is_pet = is_pet_action(act.actor_id)
-
-    if not is_player and not is_trust and not is_pet then return end
+    local actor = get_action_actor(act.actor_id)
+    local focused_target = false
 
     for _, target in ipairs(act.targets) do
-        local enemy_name = get_mob_name(target.id)
-        ensure_fight_exists(enemy_name, target.id)
+        local target_unit = get_action_actor(target.id)
+        local track_actor = actor and (actor.is_player
+            or (actor.is_trust and settings.track_trusts)
+            or (actor.is_pet and settings.track_pets)
+            or (actor.is_other_player and settings.track_party))
+        local track_target = target_unit and (target_unit.is_player
+            or (settings.track_party and (target_unit.is_other_player or target_unit.is_trust)))
 
-        for _, action in ipairs(target.actions) do
-            local damage = action.param or 0
-            local message = action.message
+        -------------------------------------------
+        -- OFFENSIVE TRACKING (Party -> Monster)
+        -------------------------------------------
+        if track_actor and not target_unit then
+            local enemy_name = get_mob_name(target.id)
+            local fight = ensure_fight_exists(enemy_name, target.id, actor.is_player and not focused_target)
+            focused_target = true
 
-            -- Determine if hit or miss using correct message IDs
-            local is_hit = false
-            local is_crit = false
+            for _, action in ipairs(target.actions) do
+                local damage = action.param or 0
+                local message = action.message
+                local is_hit = hit_messages[message] or (not miss_messages[message] and damage > 0)
+                local is_crit = crit_messages[message] or false
 
-            if hit_messages[message] then
-                is_hit = true
-                is_crit = crit_messages[message] or false
-            elseif miss_messages[message] then
-                -- Explicit miss messages (15, 63, 30, 32, 69, 70)
-                is_hit = false
-            else
-                -- Fallback: if damage > 0, it's a hit
-                is_hit = damage > 0
+                if actor.is_player then
+                    tracker.record_melee(fight, state.session_stats, { hit = is_hit, critical = is_crit, damage = damage })
+                elseif actor.is_trust and settings.track_trusts then
+                    tracker.record_trust_melee(fight, state.session_stats, actor.name, { hit = is_hit, critical = is_crit, damage = damage })
+                elseif actor.is_pet and settings.track_pets then
+                    tracker.record_pet_melee(fight, state.session_stats, actor.name, { hit = is_hit, critical = is_crit, damage = damage })
+                elseif actor.is_other_player and settings.track_party then
+                    tracker.record_trust_melee(fight, state.session_stats, actor.name, { hit = is_hit, critical = is_crit, damage = damage })
+                end
             end
 
-            if is_player then
-                tracker.record_melee(state.current_fight, state.session_stats, {
-                    hit = is_hit,
-                    critical = is_crit,
-                    damage = damage
-                })
+        -------------------------------------------
+        -- DEFENSIVE TRACKING (Monster -> Party)
+        -------------------------------------------
+        elseif not actor and track_target then
+            local enemy_name = get_mob_name(act.actor_id)
+            local fight = ensure_fight_exists(enemy_name, act.actor_id, false)
 
-                if settings.parse_to_chat then
-                    if is_hit and damage > 0 then
-                        log(string.format('Melee: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
-                    elseif not is_hit then
-                        log('Melee: MISS')
-                    end
-                end
-            elseif is_trust then
-                local trust_name = get_trust_name(act.actor_id)
-                tracker.record_trust_melee(state.current_fight, state.session_stats, trust_name, {
-                    hit = is_hit,
-                    critical = is_crit,
-                    damage = damage
-                })
+            for _, action in ipairs(target.actions) do
+                local message = action.message
 
-                if settings.parse_to_chat then
-                    if is_hit and damage > 0 then
-                        log(string.format('[%s] Melee: %d damage%s', trust_name, damage, is_crit and ' (CRIT)' or ''))
-                    end
-                end
-            elseif is_pet then
-                local pet_name = get_pet_name()
-                tracker.record_pet_melee(state.current_fight, state.session_stats, pet_name, {
-                    hit = is_hit,
-                    critical = is_crit,
-                    damage = damage
-                })
+                local defense_event = {
+                    swing = true,
+                    is_dodge = dodge_messages[message] or false,
+                    is_parry = parry_messages[message] or false,
+                    is_block = block_messages[message] or false,
+                    is_counter = counter_messages[message] or false,
+                    is_shadow = shadow_messages[message] or false,
+                    is_hit = (action.param or 0) > 0 and not shadow_messages[message] and not miss_messages[message]
+                }
 
-                if settings.parse_to_chat then
-                    if is_hit and damage > 0 then
-                        log(string.format('[%s] Melee: %d damage%s', pet_name, damage, is_crit and ' (CRIT)' or ''))
-                    end
+                if target_unit.is_player then
+                    tracker.record_defense(fight, state.session_stats, 'Player', defense_event)
+                elseif settings.track_party and (target_unit.is_other_player or target_unit.is_trust) then
+                    tracker.record_defense(fight, state.session_stats, target_unit.name, defense_event)
                 end
             end
         end
     end
-
-    display.update(state.current_fight)
+    update_overlay()
 end
 
 local function process_ranged_action(act)
-    local is_player = is_player_action(act.actor_id)
-    local is_trust = is_trust_action(act.actor_id)
-    local is_pet = is_pet_action(act.actor_id)
-
-    if not is_player and not is_trust and not is_pet then return end
+    local actor = get_action_actor(act.actor_id)
+    if not actor or not actor.is_player then return end
+    local focused_target = false
 
     for _, target in ipairs(act.targets) do
-        local enemy_name = get_mob_name(target.id)
-        ensure_fight_exists(enemy_name, target.id)
+        if not state.party_members[target.id] then
+            local enemy_name = get_mob_name(target.id)
+            local fight = ensure_fight_exists(enemy_name, target.id, not focused_target)
+            focused_target = true
 
-        for _, action in ipairs(target.actions) do
-            local damage = action.param or 0
-            local message = action.message
+            for _, action in ipairs(target.actions) do
+                local damage = action.param or 0
+                local message = action.message
+                local is_hit = hit_messages[message] or (not miss_messages[message] and damage > 0)
 
-            -- Use lookup tables for ranged hit detection
-            local is_hit = hit_messages[message] or false
-            local is_crit = crit_messages[message] or false
-
-            -- Check for explicit ranged miss
-            if miss_messages[message] then
-                is_hit = false
-            elseif not is_hit and damage > 0 then
-                -- Fallback: if damage > 0, it's a hit
-                is_hit = true
-            end
-
-            if is_player then
-                tracker.record_ranged(state.current_fight, state.session_stats, {
-                    hit = is_hit,
-                    critical = is_crit,
-                    damage = damage
-                })
-
-                if settings.parse_to_chat then
-                    if is_hit and damage > 0 then
-                        log(string.format('Ranged: %d damage%s', damage, is_crit and ' (CRIT)' or ''))
-                    elseif not is_hit then
-                        log('Ranged: MISS')
-                    end
-                end
-            elseif is_trust then
-                local trust_name = get_trust_name(act.actor_id)
-                tracker.record_trust_ranged(state.current_fight, state.session_stats, trust_name, {
-                    hit = is_hit,
-                    critical = is_crit,
-                    damage = damage
-                })
-
-                if settings.parse_to_chat then
-                    if is_hit and damage > 0 then
-                        log(string.format('[%s] Ranged: %d damage%s', trust_name, damage, is_crit and ' (CRIT)' or ''))
-                    end
-                end
-            elseif is_pet then
-                local pet_name = get_pet_name()
-                tracker.record_pet_ranged(state.current_fight, state.session_stats, pet_name, {
-                    hit = is_hit,
-                    critical = is_crit,
-                    damage = damage
-                })
-
-                if settings.parse_to_chat then
-                    if is_hit and damage > 0 then
-                        log(string.format('[%s] Ranged: %d damage%s', pet_name, damage, is_crit and ' (CRIT)' or ''))
-                    end
-                end
+                tracker.record_ranged(fight, state.session_stats, { hit = is_hit, critical = false, damage = damage })
             end
         end
     end
-
-    display.update(state.current_fight)
+    update_overlay()
 end
 
 local function process_weaponskill_action(act)
-    local is_player = is_player_action(act.actor_id)
-    local is_trust = is_trust_action(act.actor_id)
-    local is_pet = is_pet_action(act.actor_id)
-
-    if not is_player and not is_trust and not is_pet then return end
-
+    local actor = get_action_actor(act.actor_id)
+    if not actor or not actor.is_player then return end
     local ws = res.weapon_skills[act.param]
     local ws_name = ws and ws.en or ('WS#' .. act.param)
+    local focused_target = false
 
     for _, target in ipairs(act.targets) do
-        local enemy_name = get_mob_name(target.id)
-        ensure_fight_exists(enemy_name, target.id)
+        if not state.party_members[target.id] then
+            local fight = ensure_fight_exists(get_mob_name(target.id), target.id, not focused_target)
+            focused_target = true
+            local total_damage = 0
+            local hit_count = 0
+            local miss = false
 
-        local total_damage = 0
-        local hit_count = 0
-        local miss = false
-
-        for _, action in ipairs(target.actions) do
-            local damage = action.param or 0
-            local message = action.message
-            total_damage = total_damage + damage
-
-            -- Use correct WS miss messages (188 = miss, 189 = no effect)
-            if ws_miss_messages[message] then
-                miss = true
-            elseif ws_hit_messages[message] or damage > 0 then
-                hit_count = hit_count + 1
+            for _, action in ipairs(target.actions) do
+                local damage = action.param or 0
+                total_damage = total_damage + damage
+                if ws_miss_messages[action.message] then miss = true
+                elseif ws_hit_messages[action.message] or damage > 0 then hit_count = hit_count + 1 end
             end
-        end
 
-        if is_player then
-            tracker.record_weaponskill(state.current_fight, state.session_stats, {
-                name = ws_name,
-                damage = total_damage,
-                hit = not miss and (hit_count > 0 or total_damage > 0),
-                hits = hit_count
-            })
-
-            if settings.parse_to_chat then
-                if miss then
-                    log(string.format('WS: %s - MISS', ws_name))
-                else
-                    log(string.format('WS: %s - %d damage', ws_name, total_damage))
-                end
-            end
-        elseif is_trust then
-            local trust_name = get_trust_name(act.actor_id)
-            tracker.record_trust_weaponskill(state.current_fight, state.session_stats, trust_name, {
-                name = ws_name,
-                damage = total_damage,
-                hit = not miss and (hit_count > 0 or total_damage > 0),
-                hits = hit_count
-            })
-
-            if settings.parse_to_chat then
-                if not miss and total_damage > 0 then
-                    log(string.format('[%s] WS: %s - %d damage', trust_name, ws_name, total_damage))
-                end
-            end
-        elseif is_pet then
-            local pet_name = get_pet_name()
-            tracker.record_pet_weaponskill(state.current_fight, state.session_stats, pet_name, {
-                name = ws_name,
-                damage = total_damage,
-                hit = not miss and (hit_count > 0 or total_damage > 0),
-                hits = hit_count
-            })
-
-            if settings.parse_to_chat then
-                if not miss and total_damage > 0 then
-                    log(string.format('[%s] WS: %s - %d damage', pet_name, ws_name, total_damage))
-                end
-            end
+            tracker.record_weaponskill(fight, state.session_stats, { name = ws_name, damage = total_damage, hit = not miss, hits = hit_count })
         end
     end
-
-    display.update(state.current_fight)
+    update_overlay()
 end
 
 local function process_spell_action(act)
-    local is_player = is_player_action(act.actor_id)
-    local is_trust = is_trust_action(act.actor_id)
-    local is_pet = is_pet_action(act.actor_id)
-
-    if not is_player and not is_trust and not is_pet then return end
-
+    local actor = get_action_actor(act.actor_id)
+    if not actor or not actor.is_player then return end
     local spell = res.spells[act.param]
     local spell_name = spell and spell.en or ('Spell#' .. act.param)
-    local spell_type = spell and spell.type or 'Unknown'
+    local focused_target = false
 
     for _, target in ipairs(act.targets) do
-        local enemy_name = get_mob_name(target.id)
-        ensure_fight_exists(enemy_name, target.id)
+        if not state.party_members[target.id] then
+            local fight = ensure_fight_exists(get_mob_name(target.id), target.id, not focused_target)
+            focused_target = true
+            for _, action in ipairs(target.actions) do
+                local damage = action.param or 0
+                local message = action.message
+                local landed = spell_land_messages[message] or damage > 0
+                local resisted = spell_resist_messages[message] or spell_no_effect_messages[message]
 
-        for _, action in ipairs(target.actions) do
-            local damage = action.param or 0
-            local message = action.message
-
-            -- Determine if spell landed or resisted using correct message IDs
-            local landed = false
-            local resisted = false
-            local is_magic_burst = false
-
-            -- Check for resist messages first (75, 85, 284, 655, 656)
-            if spell_resist_messages[message] then
-                resisted = true
-                landed = false
-            -- Check for no effect messages
-            elseif spell_no_effect_messages[message] then
-                landed = false
-                resisted = true
-            -- Check for landed messages (damage, status effects, drains, etc.)
-            elseif spell_land_messages[message] then
-                landed = true
-                -- Check if it was a Magic Burst (252, 265, 268, 271, 274, 275)
-                if message == 252 or message == 265 or message == 268 or
-                   message == 271 or message == 274 or message == 275 then
-                    is_magic_burst = true
-                end
-            -- Fallback: if damage > 0, it landed
-            elseif damage > 0 then
-                landed = true
-            end
-
-            if is_player then
-                tracker.record_spell(state.current_fight, state.session_stats, {
-                    name = spell_name,
-                    type = spell_type,
-                    damage = damage,
-                    landed = landed,
-                    resisted = resisted
-                })
-
-                if settings.parse_to_chat then
-                    if damage > 0 then
-                        local mb_str = is_magic_burst and ' (MB!)' or ''
-                        log(string.format('Spell: %s - %d damage%s', spell_name, damage, mb_str))
-                    elseif resisted then
-                        log(string.format('Spell: %s - RESISTED', spell_name))
-                    elseif landed then
-                        log(string.format('Spell: %s - Landed', spell_name))
-                    end
-                end
-            elseif is_trust then
-                local trust_name = get_trust_name(act.actor_id)
-                tracker.record_trust_spell(state.current_fight, state.session_stats, trust_name, {
-                    name = spell_name,
-                    type = spell_type,
-                    damage = damage,
-                    landed = landed,
-                    resisted = resisted
-                })
-
-                if settings.parse_to_chat then
-                    if damage > 0 then
-                        local mb_str = is_magic_burst and ' (MB!)' or ''
-                        log(string.format('[%s] Spell: %s - %d damage%s', trust_name, spell_name, damage, mb_str))
-                    end
-                end
-            elseif is_pet then
-                local pet_name = get_pet_name()
-                tracker.record_pet_spell(state.current_fight, state.session_stats, pet_name, {
-                    name = spell_name,
-                    type = spell_type,
-                    damage = damage,
-                    landed = landed,
-                    resisted = resisted
-                })
-
-                if settings.parse_to_chat then
-                    if damage > 0 then
-                        local mb_str = is_magic_burst and ' (MB!)' or ''
-                        log(string.format('[%s] Spell: %s - %d damage%s', pet_name, spell_name, damage, mb_str))
-                    end
-                end
+                tracker.record_spell(fight, state.session_stats, { name = spell_name, type = spell and spell.type or 'Unknown', damage = damage, landed = landed, resisted = resisted })
             end
         end
     end
-
-    display.update(state.current_fight)
+    update_overlay()
 end
 
 local function process_job_ability_action(act)
-    local is_player = is_player_action(act.actor_id)
-    local is_trust = is_trust_action(act.actor_id)
-    local is_pet = is_pet_action(act.actor_id)
-
-    if not is_player and not is_trust and not is_pet then return end
-
-    -- Job abilities that deal damage (like Jump)
+    local actor = get_action_actor(act.actor_id)
+    if not actor or not actor.is_player then return end
     local ability = res.job_abilities[act.param]
     local ability_name = ability and ability.en or ('JA#' .. act.param)
+    local focused_target = false
 
     for _, target in ipairs(act.targets) do
-        local enemy_name = get_mob_name(target.id)
-        ensure_fight_exists(enemy_name, target.id)
-
-        for _, action in ipairs(target.actions) do
-            local damage = action.param or 0
-
-            if damage > 0 then
-                if is_player then
-                    tracker.record_ability(state.current_fight, state.session_stats, {
-                        name = ability_name,
-                        damage = damage
-                    })
-
-                    if settings.parse_to_chat then
-                        log(string.format('JA: %s - %d damage', ability_name, damage))
-                    end
-                elseif is_trust then
-                    local trust_name = get_trust_name(act.actor_id)
-                    tracker.record_trust_ability(state.current_fight, state.session_stats, trust_name, {
-                        name = ability_name,
-                        damage = damage
-                    })
-
-                    if settings.parse_to_chat then
-                        log(string.format('[%s] JA: %s - %d damage', trust_name, ability_name, damage))
-                    end
-                elseif is_pet then
-                    local pet_name = get_pet_name()
-                    tracker.record_pet_ability(state.current_fight, state.session_stats, pet_name, {
-                        name = ability_name,
-                        damage = damage
-                    })
-
-                    if settings.parse_to_chat then
-                        log(string.format('[%s] JA: %s - %d damage', pet_name, ability_name, damage))
-                    end
+        if not state.party_members[target.id] then
+            local fight = ensure_fight_exists(get_mob_name(target.id), target.id, not focused_target)
+            focused_target = true
+            for _, action in ipairs(target.actions) do
+                local damage = action.param or 0
+                if damage > 0 then
+                    tracker.record_ability(fight, state.session_stats, { name = ability_name, damage = damage })
                 end
             end
         end
     end
-
-    display.update(state.current_fight)
+    update_overlay()
 end
 
 -------------------------------------------
--- Event Handlers
+-- Packets & Windower Events
 -------------------------------------------
-
 windower.register_event('action', function(act)
-    if not state.player_id then
-        get_player_info()
-    end
+    local player = windower.ffxi.get_player()
+    if not player then return end
 
-    -- Periodically update trust/pet IDs (lightweight check)
-    if settings.track_trusts then
-        update_trust_ids()
-    end
-    if settings.track_pets then
-        update_pet_id()
-    end
+    if not state.player_id then get_player_info() end
+    update_party_cache()
+    expire_inactive_fights()
 
     local category = act.category
-
-    -- Category 1: Melee attack
-    if category == 1 then
-        process_melee_action(act)
-
-    -- Category 2: Ranged attack
-    elseif category == 2 then
-        process_ranged_action(act)
-
-    -- Category 3: Weapon skill
-    elseif category == 3 then
-        process_weaponskill_action(act)
-
-    -- Category 4: Spell finish
-    elseif category == 4 then
-        process_spell_action(act)
-
-    -- Category 6: Job ability
-    elseif category == 6 then
-        process_job_ability_action(act)
-
-    -- Category 11: NPC TP move (monster abilities)
-    -- Category 13: Pet ability
-    -- Category 14: Unblinkable job ability
-    -- Category 15: Run ability (RUN)
+    if category == 1 then process_melee_action(act)
+    elseif category == 2 then process_ranged_action(act)
+    elseif category == 3 then process_weaponskill_action(act)
+    elseif category == 4 then process_spell_action(act)
+    elseif category == 6 then process_job_ability_action(act)
     end
 end)
 
--- Track when enemies die to finalize fights
 windower.register_event('action message', function(actor_id, target_id, actor_index, target_index, message_id, param1, param2, param3)
-    -- Message 6 = defeated
-    if message_id == 6 and state.current_fight and state.current_fight.enemy_id == target_id then
-        state.current_fight.result = 'Victory'
-        state.current_fight.end_time = os.time()
-
-        if settings.parse_to_chat then
-            log('Enemy defeated! Fight ended.')
-        end
+    if message_id == 6 then
+        finish_fight(target_id, 'Victory')
     end
 end)
 
--------------------------------------------
--- Command Handling
--------------------------------------------
+windower.register_event('unload', function()
+    finish_all_fights('Unloaded')
+    settings:save()
+    display.hide()
+    db:close()
+end)
 
+windower.register_event('zone change', function()
+    finish_all_fights('Zoned')
+    state.current_fight = nil
+    update_overlay()
+end)
+
+-------------------------------------------
+-- Command Handling (Includes Text Search, Defenses, & Purging)
+-------------------------------------------
 windower.register_event('addon command', function(...)
     local args = T{...}
     local cmd = args[1] and args[1]:lower() or 'show'
 
-    if cmd == 'help' then
-        log('Stats Commands:')
-        log('  //stats              - Show current fight stats')
-        log('  //stats report       - Show detailed report')
-        log('  //stats reset        - Reset current fight')
-        log('  //stats history      - Show fight history')
-        log('  //stats enemy [name] - Stats for enemy type')
-        log('  //stats spell [name] - Stats for spell')
-        log('  //stats ws [name]    - Stats for weapon skill')
-        log('  //stats session      - Session totals')
-        log('  //stats trusts       - Show trust damage stats')
-        log('  //stats pets         - Show pet damage stats')
-        log('  //stats export       - Export to file')
-        log('  //stats parse [on/off] - Toggle chat output')
-        log('  //stats overlay [on/off] - Toggle overlay')
-        log('  //stats tracktrusts [on/off] - Toggle trust tracking')
-        log('  //stats trackpets [on/off] - Toggle pet tracking')
-        log('  //stats clear        - Clear all history')
+    if cmd == 'review' then
+        local search_term = #args > 1 and table.concat(args, ' ', 2) or nil
 
-    elseif cmd == 'show' or cmd == '' then
-        if state.current_fight then
-            display.show_summary(state.current_fight)
-        else
-            log('No current fight data.')
+        -- Scenario 1: Show the 10 most recent fights globally
+        if not search_term then
+            log('=== SQLite Combat History (Last 10 Fights) ===')
+            for row in db:nrows("SELECT id, enemy_name, main_job, sub_job, result, duration FROM fights ORDER BY id DESC LIMIT 10") do
+                log(string.format("[ID: %-3d]  %-15s (%s/%s) - %s (%ds)",
+                    row.id, row.enemy_name or 'Unknown', row.main_job, row.sub_job, row.result, row.duration))
+            end
+            log("--------------------------------------------------------")
+            log("Search: //stats review [name]  |  View ID: //stats review [ID]")
+            return
         end
 
-    elseif cmd == 'report' then
-        if state.current_fight then
-            display.show_detailed(state.current_fight)
+        -- Scenario 2: User typed an explicit Entry ID number (Outputs Offense + Defense summaries)
+        local id = tonumber(search_term)
+        if id and id > 0 and id == math.floor(id) then
+            local f_row = nil
+            local fight_query = db:prepare('SELECT * FROM fights WHERE id = ?')
+            fight_query:bind_values(id)
+            for row in fight_query:nrows() do f_row = row end
+            fight_query:finalize()
+
+            if not f_row then
+                log(string.format("Fight ID %d not found in database.", id))
+                return
+            end
+
+            log(string.format("=== Fight Report ID: %d ===", f_row.id))
+            log(string.format("Enemy: %s | Player: %s (%s/%s)", f_row.enemy_name, f_row.player_name, f_row.main_job, f_row.sub_job))
+            log(string.format("Result: %s | Length: %d seconds", f_row.result, f_row.duration))
+            log("--------------------------------------------------")
+
+            local damage_query = db:prepare('SELECT * FROM damage_logs WHERE fight_id = ?')
+            damage_query:bind_values(id)
+            for d_row in damage_query:nrows() do
+                if d_row.action_type == 'Defense' then
+                    -- Draw the dynamic defensive rate layout
+                    local total = d_row.total_attacks_received > 0 and d_row.total_attacks_received or 1
+                    local p_rate = math.floor((d_row.parried_swings / total) * 100)
+                    local b_rate = math.floor((d_row.blocked_swings / total) * 100)
+                    local d_rate = math.floor((d_row.evaded_swings / total) * 100)
+
+                    log(string.format("[DEFENSE] %s - Attacks: %d | Dodge: %d%% | Parry: %d%% | Block: %d%%",
+                        d_row.source, total, d_rate, p_rate, b_rate))
+                else
+                    -- Standard offensive tracking
+                    local acc = d_row.swings > 0 and math.floor((d_row.hits / d_row.swings) * 100) or 0
+                    log(string.format("[OFFENSE] %s %s: Dmg: %d | Acc: %d%% (%d/%d hits)",
+                        d_row.source, d_row.action_type, d_row.total_damage, acc, d_row.hits, d_row.swings))
+                end
+            end
+            damage_query:finalize()
+
+        -- Scenario 3: Text Search matching Player or Monster Column Wildcards
         else
-            log('No current fight data.')
+            log(string.format("=== Search Results for '%s' (Max 10) ===", search_term))
+            local found_any = false
+
+            local query = db:prepare([[
+                SELECT id, enemy_name, player_name, main_job, sub_job, result, duration
+                FROM fights
+                WHERE instr(LOWER(enemy_name), LOWER(?)) > 0
+                   OR instr(LOWER(player_name), LOWER(?)) > 0
+                ORDER BY id DESC LIMIT 10
+            ]])
+            query:bind_values(search_term, search_term)
+
+            for row in query:nrows() do
+                found_any = true
+                log(string.format("[ID: %-3d]  %-15s (%s/%s) [By: %s] - %s",
+                    row.id, row.enemy_name or 'Unknown', row.main_job, row.sub_job, row.player_name, row.result))
+            end
+            query:finalize()
+
+            if not found_any then
+                log("No historical fights found matching that player or monster name.")
+            else
+                log("--------------------------------------------------------")
+                log("Type //stats review [ID] to view deep stats for any fight.")
+            end
+        end
+
+    elseif cmd == 'purge' then
+        local confirm = args[2] and args[2]:lower() or nil
+
+        if confirm == 'confirm' then
+            log('Purging database history tables...')
+            db:exec("DELETE FROM damage_logs;")
+            db:exec("DELETE FROM fights;")
+            db:exec("VACUUM;")
+            log('Database successfully cleared and optimized.')
+        else
+            log('!!! WARNING: This will permanently delete ALL historical fight logs !!!')
+            log('To proceed, type: //stats purge confirm')
         end
 
     elseif cmd == 'reset' then
-        if state.current_fight and state.current_fight.total_swings > 0 then
-            table.insert(state.fight_history, 1, state.current_fight)
-        end
+        finish_all_fights('Reset')
         state.current_fight = nil
-        log('Fight stats reset.')
-        display.update(nil)
-
-    elseif cmd == 'history' then
-        if #state.fight_history == 0 then
-            log('No fight history.')
+        log('Active fight stats reset.')
+        update_overlay()
+    elseif cmd == 'active' then
+        local fights = {}
+        for _, fight in pairs(state.active_fights) do
+            fights[#fights + 1] = fight
+        end
+        table.sort(fights, function(a, b) return a.enemy_id < b.enemy_id end)
+        if #fights == 0 then
+            log('No active enemies.')
         else
-            log('=== Fight History ===')
-            for i, fight in ipairs(state.fight_history) do
-                if i > 10 then break end
-                local acc = fight.total_swings > 0 and
-                    math.floor((fight.total_hits / fight.total_swings) * 100) or 0
-                local duration = fight.end_time and (fight.end_time - fight.start_time) or 0
-                local total_dmg = fight.total_damage or 0
-                log(string.format('%d. %s - Dmg: %d | Acc: %d%% - %s',
-                    i, fight.enemy_name, total_dmg, acc,
-                    fight.result or 'Ongoing'))
+            log(string.format('Active enemies: %d', #fights))
+            for _, fight in ipairs(fights) do
+                log(string.format('[#%d] %s: %d damage%s', fight.enemy_id,
+                    fight.enemy_name, fight.total_damage,
+                    state.current_fight == fight and ' (overlay)' or ''))
             end
         end
-
-    elseif cmd == 'enemy' then
-        local enemy_name = args[2]
-        if not enemy_name then
-            log('Usage: //stats enemy <name>')
+    elseif cmd == 'focus' then
+        local enemy_id = tonumber(args[2])
+        local fight = enemy_id and state.active_fights[enemy_id]
+        if not fight then
+            log('Usage: //stats focus <enemy ID> (see //stats active)')
             return
         end
-
-        enemy_name = enemy_name:lower()
-        local combined = tracker.create_fight_stats('Combined: ' .. enemy_name, 0)
-        local count = 0
-
-        -- Search history for matching enemies
-        for _, fight in ipairs(state.fight_history) do
-            if fight.enemy_name:lower():find(enemy_name) then
-                tracker.combine_stats(combined, fight)
-                count = count + 1
-            end
-        end
-
-        if state.current_fight and state.current_fight.enemy_name:lower():find(enemy_name) then
-            tracker.combine_stats(combined, state.current_fight)
-            count = count + 1
-        end
-
-        if count > 0 then
-            log(string.format('=== Stats for "%s" (%d fights) ===', enemy_name, count))
-            display.show_detailed(combined)
-        else
-            log('No fights found against: ' .. enemy_name)
-        end
-
-    elseif cmd == 'spell' then
-        local spell_name = args[2]
-        if not spell_name then
-            log('Usage: //stats spell <name>')
-            return
-        end
-
-        spell_name = spell_name:lower()
-        display.show_spell_stats(state.session_stats, spell_name)
-
-    elseif cmd == 'ws' then
-        local ws_name = args[2]
-        if not ws_name then
-            log('Usage: //stats ws <name>')
-            return
-        end
-
-        ws_name = ws_name:lower()
-        display.show_ws_stats(state.session_stats, ws_name)
-
-    elseif cmd == 'session' then
-        log('=== Session Statistics ===')
-        display.show_session(state.session_stats)
-
-    elseif cmd == 'export' then
-        local filename = args[2] or ('stats_' .. os.date('%Y%m%d_%H%M%S') .. '.txt')
-        local filepath = windower.addon_path .. 'data/' .. filename
-
-        local file = io.open(filepath, 'w')
-        if file then
-            file:write('Stats Export - ' .. os.date('%Y-%m-%d %H:%M:%S') .. '\n')
-            file:write('========================================\n\n')
-
-            file:write('Session Statistics:\n')
-            file:write(string.format('  Total Melee Swings: %d\n', state.session_stats.melee.swings))
-            file:write(string.format('  Total Melee Hits: %d\n', state.session_stats.melee.hits))
-            file:write(string.format('  Melee Accuracy: %.1f%%\n',
-                state.session_stats.melee.swings > 0 and
-                (state.session_stats.melee.hits / state.session_stats.melee.swings * 100) or 0))
-            file:write(string.format('  Total Damage: %d\n', state.session_stats.melee.total_damage))
-            file:write('\n')
-
-            file:write('Weapon Skills:\n')
-            for ws_name, ws_data in pairs(state.session_stats.weaponskills) do
-                file:write(string.format('  %s: %d uses, %d-%d damage, Avg: %d\n',
-                    ws_name, ws_data.uses, ws_data.min_damage, ws_data.max_damage,
-                    ws_data.uses > 0 and math.floor(ws_data.total_damage / ws_data.uses) or 0))
-            end
-            file:write('\n')
-
-            file:write('Spells:\n')
-            for spell_name, spell_data in pairs(state.session_stats.spells) do
-                local acc = spell_data.casts > 0 and (spell_data.landed / spell_data.casts * 100) or 0
-                file:write(string.format('  %s: %d casts, %.1f%% accuracy\n',
-                    spell_name, spell_data.casts, acc))
-            end
-
-            file:close()
-            log('Stats exported to: ' .. filepath)
-        else
-            log('Failed to export stats.')
-        end
-
-    elseif cmd == 'parse' then
-        if args[2] then
-            settings.parse_to_chat = (args[2]:lower() == 'on')
-        else
-            settings.parse_to_chat = not settings.parse_to_chat
-        end
-        log('Chat parsing: ' .. (settings.parse_to_chat and 'ON' or 'OFF'))
-        settings:save()
-
+        state.current_fight = fight
+        update_overlay()
+        log(string.format('Overlay focused on %s (#%d).', fight.enemy_name, enemy_id))
     elseif cmd == 'overlay' then
-        if args[2] then
-            settings.overlay_enabled = (args[2]:lower() == 'on')
-        else
+        local value = args[2] and args[2]:lower()
+        if value == 'on' then
+            settings.overlay_enabled = true
+        elseif value == 'off' then
+            settings.overlay_enabled = false
+        elseif value == nil then
             settings.overlay_enabled = not settings.overlay_enabled
+        else
+            log('Usage: //stats overlay [on|off]')
+            return
         end
         display.toggle_overlay(settings.overlay_enabled)
+        settings:save()
         log('Overlay: ' .. (settings.overlay_enabled and 'ON' or 'OFF'))
-        settings:save()
-
-    elseif cmd == 'tracktrusts' then
-        if args[2] then
-            settings.track_trusts = (args[2]:lower() == 'on')
+    elseif cmd == 'position' then
+        if args[2] and args[2]:lower() == 'reset' then
+            display.reset_position(default_overlay_position.x, default_overlay_position.y)
+            settings:save()
+            log('Overlay position reset to 100, 100.')
         else
-            settings.track_trusts = not settings.track_trusts
+            log('Usage: //stats position reset')
         end
-        if settings.track_trusts then
-            update_trust_ids()
-        end
-        log('Trust tracking: ' .. (settings.track_trusts and 'ON' or 'OFF'))
-        settings:save()
-
-    elseif cmd == 'trackpets' then
-        if args[2] then
-            settings.track_pets = (args[2]:lower() == 'on')
-        else
-            settings.track_pets = not settings.track_pets
-        end
-        if settings.track_pets then
-            update_pet_id()
-        end
-        log('Pet tracking: ' .. (settings.track_pets and 'ON' or 'OFF'))
-        settings:save()
-
-    elseif cmd == 'trusts' then
-        if state.current_fight then
-            display.show_trust_stats(state.current_fight, state.session_stats)
-        else
-            log('No current fight data.')
-        end
-
-    elseif cmd == 'pets' then
-        if state.current_fight then
-            display.show_pet_stats(state.current_fight, state.session_stats)
-        else
-            log('No current fight data.')
-        end
-
-    elseif cmd == 'clear' then
-        state.fight_history = {}
-        state.current_fight = nil
-        state.session_stats = tracker.create_session_stats()
-        log('All stats cleared.')
-        display.update(nil)
-
+    elseif cmd == 'show' then
+        display.show_summary(state.current_fight)
+    elseif cmd == 'report' then
+        display.show_detailed(state.current_fight)
+    elseif cmd == 'help' then
+        log('//stats [show|report|active|focus <enemy ID>|reset|review [name|id]|purge|overlay [on|off]|position reset]')
     else
-        log('Unknown command: ' .. cmd .. '. Use //stats help')
-    end
-end)
-
--------------------------------------------
--- Initialization
--------------------------------------------
-
-windower.register_event('load', function()
-    log('Stats loaded. Use //stats help for commands.')
-    get_player_info()
-
-    -- Create data directory if it doesn't exist
-    windower.execute(windower.windower_path .. 'addons/Stats/data/', '', false)
-end)
-
-windower.register_event('login', function()
-    get_player_info()
-end)
-
-windower.register_event('unload', function()
-    settings:save()
-    display.hide()
-end)
-
-windower.register_event('zone change', function()
-    -- Optionally reset on zone
-    if state.current_fight then
-        state.current_fight.result = 'Zoned'
-        state.current_fight.end_time = os.time()
-
-        if state.current_fight.total_swings > 0 then
-            table.insert(state.fight_history, 1, state.current_fight)
-        end
-        state.current_fight = nil
-        display.update(nil)
+        log('Unknown command: ' .. cmd .. '. Use //stats help.')
     end
 end)

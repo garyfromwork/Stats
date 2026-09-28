@@ -1,0 +1,24 @@
+<?xml version="1.1" ?>
+<settings>
+    <global>
+        <auto_reset_on_new_fight>true</auto_reset_on_new_fight>
+        <history_limit>50</history_limit>
+        <overlay_enabled>true</overlay_enabled>
+        <overlay_position>
+            <x>100</x>
+            <y>100</y>
+        </overlay_position>
+        <parse_to_chat>false</parse_to_chat>
+        <track_party>false</track_party>
+        <track_pets>false</track_pets>
+        <track_trusts>false</track_trusts>
+    </global>
+    <garyfromwork>
+        <overlay_position>
+            <x>1194</x>
+            <y>291</y>
+        </overlay_position>
+        <track_pets>true</track_pets>
+        <track_trusts>true</track_trusts>
+    </garyfromwork>
+</settings>

@@ -143,6 +143,45 @@ function tracker.record_melee(fight, session, data)
     end
 end
 
+function tracker.record_defense(fight, session, name, event)
+    if not fight then return end
+    
+    -- 1. Initialize the target's defensive table if it doesn't exist yet
+    if not fight.defense then
+        fight.defense = {}
+    end
+    
+    if not fight.defense[name] then
+        fight.defense[name] = { 
+            swings = 0, 
+            dodge = 0, 
+            parry = 0, 
+            block = 0, 
+            counter = 0, 
+            shadow = 0, 
+            hits = 0 
+        }
+    end
+    
+    -- 2. Increment counters based on the event payload passed from Stats.lua
+    local d = fight.defense[name]
+    d.swings = d.swings + 1
+    
+    if event.is_dodge then 
+        d.dodge = d.dodge + 1
+    elseif event.is_parry then 
+        d.parry = d.parry + 1
+    elseif event.is_block then 
+        d.block = d.block + 1
+    elseif event.is_counter then 
+        d.counter = d.counter + 1
+    elseif event.is_shadow then 
+        d.shadow = d.shadow + 1
+    elseif event.is_hit then 
+        d.hits = d.hits + 1 
+    end
+end
+
 function tracker.record_ranged(fight, session, data)
     if not fight then return end
 
