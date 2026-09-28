@@ -36,27 +36,40 @@ end
 -- Overlay Functions
 -------------------------------------------
 
-function display.update(fight, active_count)
+local function player_session_damage(session)
+    if not session then return 0 end
+    local total = session.melee.total_damage + session.ranged.total_damage
+    for _, data in pairs(session.weaponskills) do total = total + data.total_damage end
+    for _, data in pairs(session.spells) do total = total + data.total_damage end
+    for _, data in pairs(session.abilities) do total = total + data.total_damage end
+    return total
+end
+
+function display.update(fight, active_count, session, character)
     if not overlay then return end
     if not settings_ref or not settings_ref.overlay_enabled then
         overlay:hide()
         return
     end
 
+    local lines = {
+        'Stats: ' .. (character or 'No character'),
+        string.format('Your session damage: %d', player_session_damage(session))
+    }
+
     if not fight then
-        overlay:text('Stats: No current fight')
+        table.insert(lines, 'No current enemy')
+        overlay:text(table.concat(lines, '\n'))
         overlay:show()
         return
     end
-
-    local lines = {}
 
     -- Header with total damage
     table.insert(lines, string.format('=== %s (#%d) ===', fight.enemy_name, fight.enemy_id))
     if active_count and active_count > 1 then
         table.insert(lines, string.format('Active enemies: %d', active_count))
     end
-    table.insert(lines, string.format('Total Damage: %d', fight.total_damage or 0))
+    table.insert(lines, string.format('Your damage to enemy: %d', fight.total_damage or 0))
 
     -- Melee accuracy
     if fight.total_swings > 0 then
@@ -190,7 +203,7 @@ function display.show_summary(fight)
     end
 
     log('=== ' .. fight.enemy_name .. ' ===')
-    log(string.format('Total Damage: %d', fight.total_damage or 0))
+    log(string.format('Your Damage to Enemy: %d', fight.total_damage or 0))
 
     -- Melee
     if fight.total_swings > 0 then
@@ -234,7 +247,7 @@ function display.show_detailed(fight)
     -- Fight duration and total damage
     local duration = (fight.end_time or os.time()) - fight.start_time
     log(string.format('Duration: %d:%02d', math.floor(duration / 60), duration % 60))
-    log(string.format('Total Damage: %d', fight.total_damage or 0))
+    log(string.format('Your Damage to Enemy: %d', fight.total_damage or 0))
     if duration > 0 then
         local dps = math.floor((fight.total_damage or 0) / duration)
         log(string.format('Average DPS: %d', dps))

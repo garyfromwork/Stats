@@ -1,6 +1,7 @@
 <?xml version="1.1" ?>
 <settings>
     <global>
+        <auto_log>true</auto_log>
         <auto_reset_on_new_fight>true</auto_reset_on_new_fight>
         <history_limit>50</history_limit>
         <overlay_enabled>true</overlay_enabled>
